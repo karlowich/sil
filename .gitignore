@@ -1,0 +1,50 @@
+# Build directories
+/build/
+
+# Meson generated files
+meson-logs/
+meson-private/
+
+# Compiled object files
+*.o
+*.obj
+*.so
+*.a
+*.lib
+*.dll
+*.dylib
+*.exe
+*.out
+*.app
+
+# Editor files
+*~
+*.swp
+*.swo
+.DS_Store
+
+# CTags/TAGS
+tags
+TAGS
+
+# Coverage reports
+*.gcda
+*.gcno
+*.gcov
+
+# Debug files
+*.dSYM/
+*.stackdump
+
+# Dependency management
+/subprojects/packagecache/
+*.cache
+*.wrap
+
+# CCache files
+.ccache/
+
+# Ninja build files
+*.ninja
+*.ninja_deps
+*.ninja_log
