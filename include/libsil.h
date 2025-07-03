@@ -6,7 +6,7 @@
 struct sil_iter;
 
 int
-sil_init(struct sil_iter **iter, const char *uri, uint32_t batch_size);
+sil_init(struct sil_iter **iter, const char *dev_uri, const char *dir, uint32_t batch_size);
 
 int
 sil_next(struct sil_iter *iter);

@@ -10,6 +10,7 @@ project('sil', 'c',
   ]
 )
 
+pkg = import('pkgconfig')
 cc = meson.get_compiler('c')
 
 rt_dep = cc.find_library('rt', required: true)
@@ -23,9 +24,16 @@ xnvme_dep = dependency(
   required: true
 )
 
+xal_dep = dependency(
+  'xal',
+  version: '0.1.0',
+  required: true
+)
+
 sil_deps = [
   rt_dep,
   xnvme_dep,
+  xal_dep,
 ]
 
 public_headers = files(
@@ -52,4 +60,6 @@ sil_cli = executable('sil',
   install: true
 )
 
-install_headers(public_headers, subdir: 'sil')
+pkg.generate(sil_library)
+
+install_headers(public_headers)
