@@ -412,10 +412,10 @@ sil_opts_default()
 {
 	struct sil_opts opts = {.root_dir = NULL,
 				.backend = "io_uring",
-				.batch_size = 1,
 				.nlb = 7,
 				.nbytes = 4096,
-				.queue_depth = 64};
+				.queue_depth = 64,
+				.batch_size = 1};
 
 	return opts;
 }

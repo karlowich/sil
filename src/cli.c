@@ -16,7 +16,7 @@ print_help(const char *name)
 {
 	fprintf(stderr, "Usage: %s <device uri> [<args>] \n", name);
 	fprintf(stderr, "Where <args> include \n");
-	fprintf(stderr, "\t --root-dir \t | \t The directory containing the files to read\n");
+	fprintf(stderr, "\t --root-dir \t | \t A directory containing subdirectories with files\n");
 	fprintf(stderr, "\t \t \t | \t The root dir should be a name of a directory, not a path\n");
 	fprintf(stderr, "\t \t \t | \t The name of the root dir should be unique\n");
 	fprintf(stderr,
