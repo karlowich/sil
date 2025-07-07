@@ -4,11 +4,11 @@
 #include <string.h>
 
 #include <libsil.h>
+#include <time.h>
 
 struct sil_cli_args {
 	char *dev_uri;
-	char *root_dir;
-	int batch_size;
+	uint32_t batches;
 };
 
 void
@@ -19,12 +19,14 @@ print_help(const char *name)
 	fprintf(stderr, "\t --root-dir \t | \t The directory containing the files to read\n");
 	fprintf(stderr, "\t \t \t | \t The root dir should be a name of a directory, not a path\n");
 	fprintf(stderr, "\t \t \t | \t The name of the root dir should be unique\n");
-	fprintf(stderr, "\t --batch-size \t | \t The number of files to read (default = 1)\n");
+	fprintf(stderr,
+		"\t --batch-size \t | \t The number of files to read per batch (default = 1)\n");
+	fprintf(stderr, "\t --batches \t | \t The number of batches to read (default = 1)\n");
 	fprintf(stderr, "\t --help \t | \t Print this message\n");
 }
 
 int
-parse_args(int argc, char *argv[], struct sil_cli_args *args)
+parse_args(int argc, char *argv[], struct sil_cli_args *args, struct sil_opts *opts)
 {
 	if (argc < 2) {
 		print_help(argv[0]);
@@ -33,11 +35,17 @@ parse_args(int argc, char *argv[], struct sil_cli_args *args)
 
 	for (int i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--root-dir") == 0) {
-			args->root_dir = argv[++i];
+			opts->root_dir = argv[++i];
 		} else if (strcmp(argv[i], "--batch-size") == 0) {
-			args->batch_size = strtol(argv[++i], (char **)NULL, 10);
-			if (args->batch_size <= 0) {
+			opts->batch_size = strtol(argv[++i], (char **)NULL, 10);
+			if (opts->batch_size <= 0) {
 				fprintf(stderr, "Invalid batch size: %s\n", argv[i]);
+				return -EINVAL;
+			}
+		} else if (strcmp(argv[i], "--batches") == 0) {
+			args->batches = strtol(argv[++i], (char **)NULL, 10);
+			if (args->batches <= 0) {
+				fprintf(stderr, "Invalid number of batches: %s\n", argv[i]);
 				return -EINVAL;
 			}
 		} else if (strcmp(argv[i], "--help") == 0) {
@@ -51,8 +59,8 @@ parse_args(int argc, char *argv[], struct sil_cli_args *args)
 		}
 	}
 
-	if (!args->batch_size) {
-		args->batch_size = 1;
+	if (!args->batches) {
+		args->batches = 1;
 	}
 
 	if (args->dev_uri == NULL) {
@@ -67,26 +75,43 @@ int
 main(int argc, char *argv[])
 {
 	struct sil_cli_args args = {0};
+	struct sil_opts opts = sil_opts_default();
+	struct sil_stats *stats;
+	struct timespec start, end;
 	struct sil_iter *iter;
+	void **buffers;
+	double time;
 	int err;
 
-	err = parse_args(argc, argv, &args);
+	err = parse_args(argc, argv, &args, &opts);
 	if (err) {
-		fprintf(stderr, "Parsing arguments failed, err: %d", err);
+		fprintf(stderr, "Parsing arguments failed, err: %d\n", err);
 		return err;
 	}
 
-	err = sil_init(&iter, args.dev_uri, args.root_dir, args.batch_size);
+	err = sil_init(&iter, args.dev_uri, &opts);
 	if (err) {
 		fprintf(stderr, "Initialzing iterator failed, err: %d\n", err);
 		return err;
 	}
 
-	err = sil_next(iter);
-	if (err) {
-		fprintf(stderr, "Reading next batch failed, err: %d\n", err);
-		return err;
+	clock_gettime(CLOCK_MONOTONIC_RAW, &start);
+	for (uint32_t i = 0; i < args.batches; i++) {
+		err = sil_next(iter, &buffers);
+		if (err) {
+			fprintf(stderr, "Reading next batch failed, err: %d\n", err);
+			return err;
+		}
 	}
+	clock_gettime(CLOCK_MONOTONIC_RAW, &end);
+	time = (double)(end.tv_sec - start.tv_sec) +
+	       (double)(end.tv_nsec - start.tv_nsec) / 1000000000.f;
+
+	stats = sil_get_stats(iter);
+	printf("Seconds: %lf\n", time);
+	printf("File/s: %lf\n", (args.batches * opts.batch_size) / time);
+	printf("MiB/s: %lf\n", (stats->bytes / 1024.f / 1024.f) / time);
+	printf("IOPS: %lf\n", stats->io / time);
 
 	sil_term(iter);
 

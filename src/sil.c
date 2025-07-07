@@ -5,6 +5,7 @@
 #include <string.h>
 #include <time.h>
 
+#include <libsil.h>
 #include <sil_util.h>
 
 #include <libxal.h>
@@ -20,13 +21,21 @@ struct sil_entry {
 
 struct sil_iter {
 	struct xnvme_dev *dev;
+	struct xnvme_queue *queue;
+	struct sil_entry *entries;
+	struct sil_stats *stats;
 	struct xal *xal;
 	struct xal_inode *root_inode;
 	const char *root_dir;
-	uint64_t index;
+	void **buffers;
 	uint32_t batch_size;
+	uint32_t nlb;
+	uint64_t nbytes;
+	uint64_t index;
 	uint64_t n_entries;
-	struct sil_entry *entries;
+	uint64_t buffer_size;
+	uint64_t *slbas;
+	uint64_t *elbas;
 };
 
 static int
@@ -41,11 +50,19 @@ inode_cmp(const void *a, const void *b)
 }
 
 static int
-_xnvme_setup(struct sil_iter *iter, const char *uri)
+_xnvme_setup(struct sil_iter *iter, const char *uri, const char *backend, uint32_t queue_depth)
 {
 	struct xnvme_opts opts = xnvme_opts_default();
 	struct xnvme_dev *dev;
 	int err;
+
+	if (strcmp(backend, "io_uring") == 0) {
+		opts.be = "linux";
+		opts.async = "io_uring";
+	} else if (strcmp(backend, "spdk") == 0) {
+		opts.be = "spdk";
+	}
+
 	dev = xnvme_dev_open(uri, &opts);
 	if (!dev) {
 		err = errno;
@@ -60,7 +77,26 @@ _xnvme_setup(struct sil_iter *iter, const char *uri)
 		return err;
 	}
 
+	err = xnvme_queue_init(dev, queue_depth, 0, &iter->queue);
+	if (err) {
+		xnvme_dev_close(dev);
+		fprintf(stderr, "xnvme_queue_init(): %d\n", err);
+		return err;
+	}
+
 	iter->dev = dev;
+	return 0;
+}
+
+static int
+find_buffer_size(struct xal *SIL_UNUSED(xal), struct xal_inode *inode, void *cb_args,
+		 int SIL_UNUSED(level))
+{
+	uint64_t *buffer_size = (uint64_t *)cb_args;
+
+	if (xal_inode_is_file(inode) && inode->size > *buffer_size) {
+		*buffer_size = inode->size;
+	}
 	return 0;
 }
 
@@ -126,6 +162,18 @@ _xal_setup(struct sil_iter *iter, const char *root_dir)
 		iter->root_inode = xal->root;
 	}
 
+	iter->buffer_size = 0;
+	err = xal_walk(xal, iter->root_inode, find_buffer_size, &iter->buffer_size);
+	if (err) {
+		fprintf(stderr, "xal_walk(find_buffer_size): %d\n", err);
+		return err;
+	}
+
+	if (!iter->buffer_size) {
+		fprintf(stderr, "Couldn't determine buffer size\n");
+		return EIO;
+	}
+
 	iter->xal = xal;
 	return 0;
 }
@@ -143,7 +191,7 @@ _create_entries(struct sil_iter *iter)
 		n_entries += root_dentries.inodes[i].content.dentries.count;
 	}
 
-	entries = (struct sil_entry *)malloc(sizeof(struct sil_entry) * n_entries);
+	entries = malloc(sizeof(struct sil_entry) * n_entries);
 	if (!entries) {
 		err = errno;
 		fprintf(stderr, "Could not allocate entries: %d\n", err);
@@ -185,37 +233,101 @@ _shuffle_entries(struct sil_iter *iter)
 	}
 }
 
+static int
+_alloc(struct sil_iter *iter)
+{
+	int err;
+	iter->buffers = malloc(sizeof(void *) * iter->batch_size);
+	if (!iter->buffers) {
+		err = errno;
+		fprintf(stderr, "Could not allocate array of buffers: %d\n", err);
+		return err;
+	}
+
+	for (uint32_t i = 0; i < iter->batch_size; i++) {
+		iter->buffers[i] = xnvme_buf_alloc(iter->dev, iter->buffer_size);
+		if (!iter->buffers[i]) {
+			err = errno;
+			fprintf(stderr, "Could not allocate buffers[%d]: %d\n", i, err);
+			return err;
+		}
+	}
+
+	iter->slbas = malloc(sizeof(uint64_t) * iter->batch_size);
+	if (!iter->slbas) {
+		err = errno;
+		fprintf(stderr, "Could not allocate array for slbas: %d\n", err);
+		return err;
+	}
+
+	iter->elbas = malloc(sizeof(uint64_t) * iter->batch_size);
+	if (!iter->elbas) {
+		err = errno;
+		fprintf(stderr, "Could not allocate array for elbas: %d\n", err);
+		return err;
+	}
+
+	iter->stats = malloc(sizeof(struct sil_stats));
+	if (!iter->stats) {
+		err = errno;
+		fprintf(stderr, "Could not allocate array for elbas: %d\n", err);
+		return err;
+	}
+	iter->stats->bytes = 0;
+	iter->stats->io = 0;
+
+	return 0;
+}
+
 void
 sil_term(struct sil_iter *iter)
 {
+	for (uint32_t i = 0; i < iter->batch_size; i++) {
+		xnvme_buf_free(iter->dev, iter->buffers[i]);
+	}
 	xal_close(iter->xal);
 	xnvme_dev_close(iter->dev);
 	free(iter->entries);
+	free(iter->buffers);
+	free(iter->slbas);
+	free(iter->elbas);
+	free(iter->stats);
 	free(iter);
 }
 
 int
-sil_init(struct sil_iter **iter, const char *dev_uri, const char *root_dir, uint32_t batch_size)
+sil_init(struct sil_iter **iter, const char *dev_uri, struct sil_opts *opts)
 {
 	struct sil_iter *_iter;
 	int err;
 
-	_iter = (struct sil_iter *)malloc(sizeof(struct sil_iter));
+	_iter = malloc(sizeof(struct sil_iter));
 	if (!_iter) {
 		err = errno;
 		fprintf(stderr, "Could not allocate iter: %d\n", err);
 		return err;
 	}
 
-	err = _xnvme_setup(_iter, dev_uri);
+	_iter->batch_size = opts->batch_size;
+	_iter->nlb = opts->nlb;
+	_iter->nbytes = opts->nbytes;
+	_iter->index = 0;
+
+	err = _xnvme_setup(_iter, dev_uri, opts->backend, opts->queue_depth);
 	if (err) {
 		goto exit;
 	}
 
-	err = _xal_setup(_iter, root_dir);
+	err = _xal_setup(_iter, opts->root_dir);
 	if (err) {
 		xnvme_dev_close(_iter->dev);
 		goto exit;
+	}
+
+	err = _alloc(_iter);
+	if (err) {
+		sil_term(_iter);
+		return err;
 	}
 
 	// Sort the directories so we can derive labels
@@ -236,9 +348,6 @@ sil_init(struct sil_iter **iter, const char *dev_uri, const char *root_dir, uint
 	srand(time(NULL));
 	_shuffle_entries(_iter);
 
-	_iter->batch_size = batch_size;
-	_iter->index = 0;
-
 	(*iter) = _iter;
 
 	return 0;
@@ -249,22 +358,70 @@ exit:
 }
 
 int
-sil_next(struct sil_iter *iter)
+sil_next(struct sil_iter *iter, void ***buffers)
 {
 	struct sil_entry entry;
+	struct xal_inode dir;
+	struct xal_inode file;
+	struct xal_extent extent;
+	uint64_t nblocks, nbytes, blocksize;
+
+	int err;
+
 	if (iter->index >= iter->n_entries) {
 		iter->index = 0;
 		_shuffle_entries(iter);
 	}
 
+	blocksize = xnvme_dev_get_geo(iter->dev)->lba_nbytes;
+
 	for (uint32_t i = 0; i < iter->batch_size; i++) {
 		entry = iter->entries[iter->index++ % iter->n_entries];
-		printf("dir: %lu, file: %lu \n", entry.dir, entry.file);
-		printf("dir: %s, file: %s \n",
-		       iter->root_inode->content.dentries.inodes[entry.dir].name,
-		       iter->root_inode->content.dentries.inodes[entry.dir]
-			   .content.dentries.inodes[entry.file]
-			   .name);
+
+		dir = iter->root_inode->content.dentries.inodes[entry.dir];
+		file = dir.content.dentries.inodes[entry.file];
+		if (file.content.extents.count != 1) {
+			fprintf(stderr, "File: %s, in dir: %s, has more than one extents: %d \n",
+				file.name, dir.name, file.content.extents.count);
+			return ENOTSUP;
+		}
+		extent = file.content.extents.extent[0];
+		nbytes = extent.nblocks * iter->xal->sb.blocksize;
+		nblocks = nbytes / blocksize;
+
+		iter->slbas[i] = xal_fsbno_offset(iter->xal, extent.start_block) / blocksize;
+		iter->elbas[i] = iter->slbas[i] + nblocks - 1;
+		iter->stats->io += nblocks / (iter->nlb + 1);
+		iter->stats->bytes += nbytes;
 	}
+
+	err = xnvme_io_range_submit(iter->queue, XNVME_SPEC_NVM_OPC_READ, iter->slbas, iter->elbas,
+				    iter->nlb, iter->nbytes, iter->buffers, iter->batch_size);
+	if (err) {
+		fprintf(stderr, "Data reading failed, err: %d\n", err);
+		return err;
+	}
+
+	*buffers = iter->buffers;
+
 	return 0;
+}
+
+struct sil_opts
+sil_opts_default()
+{
+	struct sil_opts opts = {.root_dir = NULL,
+				.backend = "io_uring",
+				.batch_size = 1,
+				.nlb = 7,
+				.nbytes = 4096,
+				.queue_depth = 64};
+
+	return opts;
+}
+
+struct sil_stats *
+sil_get_stats(struct sil_iter *iter)
+{
+	return iter->stats;
 }
