@@ -59,8 +59,16 @@ _xnvme_setup(struct sil_iter *iter, const char *uri, const char *backend, uint32
 	if (strcmp(backend, "io_uring") == 0) {
 		opts.be = "linux";
 		opts.async = "io_uring";
+		opts.direct = 0;
+	} else if (strcmp(backend, "io_uring_direct") == 0) {
+		opts.be = "linux";
+		opts.async = "io_uring";
+		opts.direct = 1;
 	} else if (strcmp(backend, "spdk") == 0) {
 		opts.be = "spdk";
+	} else {
+		fprintf(stderr, "Invalid backend: %s", backend);
+		return EINVAL;
 	}
 
 	dev = xnvme_dev_open(uri, &opts);
