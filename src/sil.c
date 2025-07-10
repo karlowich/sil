@@ -182,6 +182,10 @@ _xal_setup(struct sil_iter *iter, const char *root_dir)
 		return EIO;
 	}
 
+	// Align to page size
+	iter->buffer_size =
+	    (1 + ((iter->buffer_size - 1) / xal->sb.blocksize)) * (xal->sb.blocksize);
+
 	iter->xal = xal;
 	return 0;
 }
