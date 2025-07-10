@@ -375,8 +375,8 @@ sil_next(struct sil_iter *iter, void ***buffers)
 	struct sil_entry entry;
 	struct xal_inode dir;
 	struct xal_inode file;
-	struct xal_extent extent;
-	uint64_t nblocks, nbytes, blocksize;
+	struct xal_extent extent, next_extent;
+	uint64_t nblocks, nbytes, blocksize, slba;
 
 	int err;
 
@@ -392,16 +392,26 @@ sil_next(struct sil_iter *iter, void ***buffers)
 
 		dir = iter->root_inode->content.dentries.inodes[entry.dir];
 		file = dir.content.dentries.inodes[entry.file];
-		if (file.content.extents.count != 1) {
-			fprintf(stderr, "File: %s, in dir: %s, has more than one extents: %d \n",
-				file.name, dir.name, file.content.extents.count);
-			return ENOTSUP;
-		}
 		extent = file.content.extents.extent[0];
+		iter->slbas[i] = xal_fsbno_offset(iter->xal, extent.start_block) / blocksize;
+
 		nbytes = extent.nblocks * iter->xal->sb.blocksize;
 		nblocks = nbytes / blocksize;
 
-		iter->slbas[i] = xal_fsbno_offset(iter->xal, extent.start_block) / blocksize;
+		for (uint32_t j = 1; j < file.content.extents.count; j++) {
+			next_extent = file.content.extents.extent[j];
+			slba = xal_fsbno_offset(iter->xal, next_extent.start_block) / blocksize;
+			if (slba != iter->slbas[i] + nblocks) {
+				fprintf(stderr,
+					"File: %s, in dir: %s, has non contiguous extents\n",
+					file.name, dir.name);
+				fprintf(stderr, "extent[%d].elba: %lu, extent[%d].slba: %lu\n",
+					j - 1, iter->slbas[i] + nblocks - 1, j, slba);
+				return ENOTSUP;
+			}
+			nbytes += next_extent.nblocks * iter->xal->sb.blocksize;
+			nblocks = nbytes / blocksize;
+		}
 		iter->elbas[i] = iter->slbas[i] + nblocks - 1;
 		iter->stats->io += nblocks / (iter->nlb + 1);
 		iter->stats->bytes += nbytes;
