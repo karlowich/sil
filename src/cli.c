@@ -20,7 +20,7 @@ print_help(const char *name)
 	fprintf(stderr, "\t \t \t | \t The root dir should be a name of a directory, not a path\n");
 	fprintf(stderr, "\t \t \t | \t The name of the root dir should be unique\n");
 	fprintf(stderr, "\t --backend \t | \t The backend to use for reading files (io_uring "
-			"[default], io_uring_direct, or spdk)\n");
+			"[default], io_uring_direct, libnvm-cpu, libnvm-gpu or spdk)\n");
 	fprintf(stderr,
 		"\t --batch-size \t | \t The number of files to read per batch (default = 1)\n");
 	fprintf(stderr, "\t --batches \t | \t The number of batches to read (default = 1)\n");

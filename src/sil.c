@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -14,6 +15,11 @@
 // Arbitrary value out of range of normal err
 #define ROOT_DIR_FOUND 9000
 
+#define GPU_NQ 128
+#define GPU_QD 1024
+#define GPU_GSIZE 1024
+#define GPU_TBSIZE 64
+
 struct sil_entry {
 	uint64_t dir;
 	uint64_t file;
@@ -27,6 +33,7 @@ struct sil_iter {
 	struct xal *xal;
 	struct xal_inode *root_inode;
 	const char *root_dir;
+	int (*io_fn)(struct sil_iter *iter);
 	void **buffers;
 	uint32_t batch_size;
 	uint32_t nlb;
@@ -36,6 +43,7 @@ struct sil_iter {
 	uint64_t buffer_size;
 	uint64_t *slbas;
 	uint64_t *elbas;
+	bool gpu;
 };
 
 static int
@@ -66,8 +74,13 @@ _xnvme_setup(struct sil_iter *iter, const char *uri, const char *backend, uint32
 		opts.direct = 1;
 	} else if (strcmp(backend, "spdk") == 0) {
 		opts.be = "spdk";
+	} else if (strcmp(backend, "libnvm-cpu") == 0) {
+		opts.be = "bam";
+	} else if (strcmp(backend, "libnvm-gpu") == 0) {
+		opts.be = "bam";
+		iter->gpu = true;
 	} else {
-		fprintf(stderr, "Invalid backend: %s", backend);
+		fprintf(stderr, "Invalid backend: %s\n", backend);
 		return EINVAL;
 	}
 
@@ -85,11 +98,20 @@ _xnvme_setup(struct sil_iter *iter, const char *uri, const char *backend, uint32
 		return err;
 	}
 
-	err = xnvme_queue_init(dev, queue_depth, 0, &iter->queue);
-	if (err) {
-		xnvme_dev_close(dev);
-		fprintf(stderr, "xnvme_queue_init(): %d\n", err);
-		return err;
+	if (!iter->gpu) {
+		err = xnvme_queue_init(dev, queue_depth, 0, &iter->queue);
+		if (err) {
+			xnvme_dev_close(dev);
+			fprintf(stderr, "xnvme_queue_init(): %d\n", err);
+			return err;
+		}
+	} else {
+		err = xnvme_gpu_create_queues(dev, GPU_QD, GPU_NQ);
+		if (err) {
+			xnvme_dev_close(dev);
+			fprintf(stderr, "xnvme_gpu_create_queues(): %d\n", err);
+			return err;
+		}
 	}
 
 	iter->dev = dev;
@@ -291,6 +313,21 @@ _alloc(struct sil_iter *iter)
 	return 0;
 }
 
+int
+sil_cpu_submit(struct sil_iter *iter)
+{
+	return xnvme_io_range_submit(iter->queue, XNVME_SPEC_NVM_OPC_READ, iter->slbas, iter->elbas,
+				     iter->nlb, iter->nbytes, iter->buffers, iter->batch_size);
+}
+
+int
+sil_gpu_submit(struct sil_iter *iter)
+{
+	return xnvme_gpu_range_submit(GPU_GSIZE, GPU_TBSIZE, iter->dev, XNVME_SPEC_NVM_OPC_READ,
+				      iter->slbas, iter->elbas, iter->nlb, iter->nbytes,
+				      iter->buffers, iter->batch_size);
+}
+
 void
 sil_term(struct sil_iter *iter)
 {
@@ -298,6 +335,11 @@ sil_term(struct sil_iter *iter)
 		xnvme_buf_free(iter->dev, iter->buffers[i]);
 	}
 	xal_close(iter->xal);
+	if (!iter->gpu) {
+		xnvme_queue_term(iter->queue);
+	} else {
+		xnvme_gpu_delete_queues(iter->dev);
+	}
 	xnvme_dev_close(iter->dev);
 	free(iter->entries);
 	free(iter->buffers);
@@ -328,6 +370,12 @@ sil_init(struct sil_iter **iter, const char *dev_uri, struct sil_opts *opts)
 	err = _xnvme_setup(_iter, dev_uri, opts->backend, opts->queue_depth);
 	if (err) {
 		goto exit;
+	}
+
+	if (!_iter->gpu) {
+		_iter->io_fn = sil_cpu_submit;
+	} else {
+		_iter->io_fn = sil_gpu_submit;
 	}
 
 	err = _xal_setup(_iter, opts->root_dir);
@@ -417,8 +465,7 @@ sil_next(struct sil_iter *iter, void ***buffers)
 		iter->stats->bytes += nbytes;
 	}
 
-	err = xnvme_io_range_submit(iter->queue, XNVME_SPEC_NVM_OPC_READ, iter->slbas, iter->elbas,
-				    iter->nlb, iter->nbytes, iter->buffers, iter->batch_size);
+	err = iter->io_fn(iter);
 	if (err) {
 		fprintf(stderr, "Data reading failed, err: %d\n", err);
 		return err;
