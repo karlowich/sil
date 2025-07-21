@@ -104,6 +104,7 @@ main(int argc, char *argv[])
 		err = sil_next(iter, &buffers);
 		if (err) {
 			fprintf(stderr, "Reading next batch failed, err: %d\n", err);
+			sil_term(iter);
 			return err;
 		}
 	}
