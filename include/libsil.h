@@ -39,8 +39,11 @@ struct sil_opts {
  * I/O Stats for calculating IOPS or bandwidth
  */
 struct sil_stats {
-	uint64_t bytes; ///< Total number of bytes read
-	uint64_t io;	///< Total number of commands sent
+	uint64_t bytes;		///< Total number of bytes read
+	uint64_t io;		///< Total number of commands sent
+	uint64_t n_files;	///< Number of files in the dataset
+	uint64_t max_file_size; ///< Maximum size of files in the dataset
+	double avg_file_size;	///< Average size of files in the dataset
 };
 
 /**

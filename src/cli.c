@@ -118,6 +118,10 @@ main(int argc, char *argv[])
 	printf("MiB/s: %lf\n", (stats->bytes / 1024.f / 1024.f) / time);
 	printf("IOPS: %lf\n", stats->io / time);
 
+	printf("\nNumber of files in the dataset: %lu\n", stats->n_files);
+	printf("Maximum size of files in the dataset (KiB): %lu\n", stats->max_file_size/1024);
+	printf("Average size of files in the dataset (KiB): %lf\n", stats->avg_file_size/1024);
+
 	sil_term(iter);
 
 	return 0;

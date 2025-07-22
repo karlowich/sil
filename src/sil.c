@@ -122,10 +122,14 @@ static int
 find_buffer_size(struct xal *SIL_UNUSED(xal), struct xal_inode *inode, void *cb_args,
 		 int SIL_UNUSED(level))
 {
-	uint64_t *buffer_size = (uint64_t *)cb_args;
+	struct sil_stats *stats = (struct sil_stats *)cb_args;
 
-	if (xal_inode_is_file(inode) && inode->size > *buffer_size) {
-		*buffer_size = inode->size;
+	if (xal_inode_is_file(inode)) {
+		stats->n_files++;
+		stats->avg_file_size += inode->size;
+		if (inode->size > stats->max_file_size) {
+			stats->max_file_size = inode->size;
+		}
 	}
 	return 0;
 }
@@ -193,20 +197,16 @@ _xal_setup(struct sil_iter *iter, const char *root_dir)
 	}
 
 	iter->buffer_size = 0;
-	err = xal_walk(xal, iter->root_inode, find_buffer_size, &iter->buffer_size);
+	err = xal_walk(xal, iter->root_inode, find_buffer_size, iter->stats);
 	if (err) {
 		fprintf(stderr, "xal_walk(find_buffer_size): %d\n", err);
 		return err;
 	}
 
-	if (!iter->buffer_size) {
-		fprintf(stderr, "Couldn't determine buffer size\n");
-		return EIO;
-	}
-
+	iter->stats->avg_file_size = iter->stats->avg_file_size / iter->stats->n_files;
 	// Align to page size
 	iter->buffer_size =
-	    (1 + ((iter->buffer_size - 1) / xal->sb.blocksize)) * (xal->sb.blocksize);
+	    (1 + ((iter->stats->max_file_size - 1) / xal->sb.blocksize)) * (xal->sb.blocksize);
 
 	iter->xal = xal;
 	return 0;
@@ -301,15 +301,6 @@ _alloc(struct sil_iter *iter)
 		return err;
 	}
 
-	iter->stats = malloc(sizeof(struct sil_stats));
-	if (!iter->stats) {
-		err = errno;
-		fprintf(stderr, "Could not allocate array for elbas: %d\n", err);
-		return err;
-	}
-	iter->stats->bytes = 0;
-	iter->stats->io = 0;
-
 	return 0;
 }
 
@@ -377,6 +368,18 @@ sil_init(struct sil_iter **iter, const char *dev_uri, struct sil_opts *opts)
 	} else {
 		_iter->io_fn = sil_gpu_submit;
 	}
+
+	_iter->stats = malloc(sizeof(struct sil_stats));
+	if (!_iter->stats) {
+		err = errno;
+		fprintf(stderr, "Could not allocate array for elbas: %d\n", err);
+		return err;
+	}
+	_iter->stats->bytes = 0;
+	_iter->stats->io = 0;
+	_iter->stats->n_files = 0;
+	_iter->stats->max_file_size = 0;
+	_iter->stats->avg_file_size = 0;
 
 	err = _xal_setup(_iter, opts->root_dir);
 	if (err) {
