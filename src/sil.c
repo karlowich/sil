@@ -18,11 +18,16 @@
 #define GPU_NQ 128
 #define GPU_QD 1024
 #define GPU_GSIZE 1024
-#define GPU_TBSIZE 64
+#define GPU_TBSIZE 128
 
 struct sil_entry {
 	uint64_t dir;
 	uint64_t file;
+};
+
+struct sil_cpu_io {
+	uint64_t *slbas;
+	uint64_t *elbas;
 };
 
 struct sil_iter {
@@ -32,6 +37,8 @@ struct sil_iter {
 	struct sil_stats *stats;
 	struct xal *xal;
 	struct xal_inode *root_inode;
+	struct xnvme_gpu_io *gpu_io;
+	struct sil_cpu_io *cpu_io;
 	const char *root_dir;
 	int (*io_fn)(struct sil_iter *iter);
 	void **buffers;
@@ -41,8 +48,6 @@ struct sil_iter {
 	uint64_t index;
 	uint64_t n_entries;
 	uint64_t buffer_size;
-	uint64_t *slbas;
-	uint64_t *elbas;
 	bool gpu;
 };
 
@@ -98,18 +103,18 @@ _xnvme_setup(struct sil_iter *iter, const char *uri, const char *backend, uint32
 		return err;
 	}
 
-	if (!iter->gpu) {
-		err = xnvme_queue_init(dev, queue_depth, 0, &iter->queue);
-		if (err) {
-			xnvme_dev_close(dev);
-			fprintf(stderr, "xnvme_queue_init(): %d\n", err);
-			return err;
-		}
-	} else {
+	if (iter->gpu) {
 		err = xnvme_gpu_create_queues(dev, GPU_QD, GPU_NQ);
 		if (err) {
 			xnvme_dev_close(dev);
 			fprintf(stderr, "xnvme_gpu_create_queues(): %d\n", err);
+			return err;
+		}
+	} else {
+		err = xnvme_queue_init(dev, queue_depth, 0, &iter->queue);
+		if (err) {
+			xnvme_dev_close(dev);
+			fprintf(stderr, "xnvme_queue_init(): %d\n", err);
 			return err;
 		}
 	}
@@ -268,7 +273,7 @@ _shuffle_entries(struct sil_iter *iter)
 }
 
 static int
-_alloc(struct sil_iter *iter)
+_alloc_cpu(struct sil_iter *iter)
 {
 	int err;
 	iter->buffers = malloc(sizeof(void *) * iter->batch_size);
@@ -287,15 +292,22 @@ _alloc(struct sil_iter *iter)
 		}
 	}
 
-	iter->slbas = malloc(sizeof(uint64_t) * iter->batch_size);
-	if (!iter->slbas) {
+	iter->cpu_io = malloc(sizeof(struct sil_cpu_io));
+	if (!iter->cpu_io) {
+		err = errno;
+		fprintf(stderr, "Could not allocate IO struct: %d\n", err);
+		return err;
+	}
+
+	iter->cpu_io->slbas = malloc(sizeof(uint64_t) * iter->batch_size);
+	if (!iter->cpu_io->slbas) {
 		err = errno;
 		fprintf(stderr, "Could not allocate array for slbas: %d\n", err);
 		return err;
 	}
 
-	iter->elbas = malloc(sizeof(uint64_t) * iter->batch_size);
-	if (!iter->elbas) {
+	iter->cpu_io->elbas = malloc(sizeof(uint64_t) * iter->batch_size);
+	if (!iter->cpu_io->elbas) {
 		err = errno;
 		fprintf(stderr, "Could not allocate array for elbas: %d\n", err);
 		return err;
@@ -304,38 +316,167 @@ _alloc(struct sil_iter *iter)
 	return 0;
 }
 
+static int
+_alloc_gpu(struct sil_iter *iter)
+{
+	int err;
+	iter->buffers = malloc(sizeof(void *) * iter->batch_size);
+	if (!iter->buffers) {
+		err = errno;
+		fprintf(stderr, "Could not allocate array of buffers: %d\n", err);
+		return err;
+	}
+
+	for (uint32_t i = 0; i < iter->batch_size; i++) {
+		iter->buffers[i] = xnvme_gpu_alloc(iter->dev, iter->buffer_size);
+		if (!iter->buffers[i]) {
+			err = errno;
+			fprintf(stderr, "Could not allocate buffers[%d]: %d\n", i, err);
+			return err;
+		}
+	}
+
+	err = xnvme_gpu_io_alloc(&iter->gpu_io,
+				 (iter->buffer_size / iter->nbytes) * iter->batch_size);
+	if (err) {
+		fprintf(stderr, "Could not allocate IO struct: %d\n", err);
+		return err;
+	}
+	return 0;
+}
+
 int
 sil_cpu_submit(struct sil_iter *iter)
 {
-	return xnvme_io_range_submit(iter->queue, XNVME_SPEC_NVM_OPC_READ, iter->slbas, iter->elbas,
-				     iter->nlb, iter->nbytes, iter->buffers, iter->batch_size);
+	struct sil_entry entry;
+	struct xal_inode dir;
+	struct xal_inode file;
+	struct xal_extent extent, next_extent;
+	uint64_t nblocks, nbytes, blocksize, next_slba;
+
+	blocksize = xnvme_dev_get_geo(iter->dev)->lba_nbytes;
+	for (uint32_t i = 0; i < iter->batch_size; i++) {
+		entry = iter->entries[iter->index++ % iter->n_entries];
+
+		dir = iter->root_inode->content.dentries.inodes[entry.dir];
+		file = dir.content.dentries.inodes[entry.file];
+		extent = file.content.extents.extent[0];
+		iter->cpu_io->slbas[i] =
+		    xal_fsbno_offset(iter->xal, extent.start_block) / blocksize;
+
+		nbytes = extent.nblocks * iter->xal->sb.blocksize;
+		nblocks = nbytes / blocksize;
+
+		for (uint32_t j = 1; j < file.content.extents.count; j++) {
+			next_extent = file.content.extents.extent[j];
+			next_slba =
+			    xal_fsbno_offset(iter->xal, next_extent.start_block) / blocksize;
+			if (next_slba != iter->cpu_io->slbas[i] + nblocks) {
+				fprintf(stderr,
+					"File: %s, in dir: %s, has non contiguous extents\n",
+					file.name, dir.name);
+				fprintf(stderr, "extent[%d].elba: %lu, extent[%d].slba: %lu\n",
+					j - 1, iter->cpu_io->slbas[i] + nblocks - 1, j, next_slba);
+				return ENOTSUP;
+			}
+			nbytes += next_extent.nblocks * iter->xal->sb.blocksize;
+			nblocks = nbytes / blocksize;
+		}
+		iter->cpu_io->elbas[i] = iter->cpu_io->slbas[i] + nblocks - 1;
+		iter->stats->io += nblocks / (iter->nlb + 1);
+		iter->stats->bytes += nbytes;
+	}
+	return xnvme_io_range_submit(iter->queue, XNVME_SPEC_NVM_OPC_READ, iter->cpu_io->slbas,
+				     iter->cpu_io->elbas, iter->nlb, iter->nbytes, iter->buffers,
+				     iter->batch_size);
 }
 
 int
 sil_gpu_submit(struct sil_iter *iter)
 {
-	return xnvme_gpu_range_submit(GPU_GSIZE, GPU_TBSIZE, iter->dev, XNVME_SPEC_NVM_OPC_READ,
-				      iter->slbas, iter->elbas, iter->nlb, iter->nbytes,
-				      iter->buffers, iter->batch_size);
+	struct sil_entry entry;
+	struct xal_inode dir;
+	struct xal_inode file;
+	struct xal_extent extent, next_extent;
+	uint64_t nblocks, nbytes, blocksize, cur_slba, next_slba, n_io = 0;
+	int err;
+
+	blocksize = xnvme_dev_get_geo(iter->dev)->lba_nbytes;
+	for (uint32_t i = 0; i < iter->batch_size; i++) {
+		entry = iter->entries[iter->index++ % iter->n_entries];
+
+		dir = iter->root_inode->content.dentries.inodes[entry.dir];
+		file = dir.content.dentries.inodes[entry.file];
+		extent = file.content.extents.extent[0];
+
+		cur_slba = xal_fsbno_offset(iter->xal, extent.start_block) / blocksize;
+		nbytes = extent.nblocks * iter->xal->sb.blocksize;
+		nblocks = nbytes / blocksize;
+
+		for (uint32_t j = 1; j < file.content.extents.count; j++) {
+			next_extent = file.content.extents.extent[j];
+			next_slba =
+			    xal_fsbno_offset(iter->xal, next_extent.start_block) / blocksize;
+			if (next_slba != cur_slba + nblocks) {
+				fprintf(stderr,
+					"File: %s, in dir: %s, has non contiguous extents\n",
+					file.name, dir.name);
+				fprintf(stderr, "extent[%d].elba: %lu, extent[%d].slba: %lu\n",
+					j - 1, cur_slba + nblocks - 1, j, next_slba);
+				return ENOTSUP;
+			}
+			nbytes += next_extent.nblocks * iter->xal->sb.blocksize;
+			nblocks = nbytes / blocksize;
+		}
+		iter->stats->bytes += nbytes;
+
+		for (uint64_t j = 0; j < nblocks / (iter->nlb + 1); j++) {
+			iter->gpu_io->offsets[n_io] = j * (iter->nlb + 1);
+			iter->gpu_io->slbas[n_io] = cur_slba + iter->gpu_io->offsets[n_io];
+			iter->gpu_io->buffers[n_io] = iter->buffers[i];
+			n_io++;
+		}
+	}
+	iter->stats->io += n_io;
+	iter->gpu_io->n_io = n_io;
+
+	err = xnvme_gpu_io_submit(GPU_GSIZE, GPU_TBSIZE, iter->dev, XNVME_SPEC_NVM_OPC_READ,
+				  iter->nlb, iter->nbytes, iter->gpu_io);
+	if (err) {
+		fprintf(stderr, "Could not launch kernel: %d\n", err);
+		return err;
+	}
+
+	err = xnvme_gpu_sync();
+	if (err) {
+		fprintf(stderr, "Error synchronizing kernels: %d\n", err);
+		return err;
+	}
+	return 0;
 }
 
 void
 sil_term(struct sil_iter *iter)
 {
-	for (uint32_t i = 0; i < iter->batch_size; i++) {
-		xnvme_buf_free(iter->dev, iter->buffers[i]);
+	if (iter->gpu) {
+		for (uint32_t i = 0; i < iter->batch_size; i++) {
+			xnvme_gpu_free(iter->dev, iter->buffers[i]);
+		}
+		xnvme_gpu_delete_queues(iter->dev);
+		xnvme_gpu_io_free(iter->gpu_io);
+	} else {
+		for (uint32_t i = 0; i < iter->batch_size; i++) {
+			xnvme_buf_free(iter->dev, iter->buffers[i]);
+		}
+		free(iter->cpu_io);
+		free(iter->cpu_io->slbas);
+		free(iter->cpu_io->elbas);
+		xnvme_queue_term(iter->queue);
 	}
 	xal_close(iter->xal);
-	if (!iter->gpu) {
-		xnvme_queue_term(iter->queue);
-	} else {
-		xnvme_gpu_delete_queues(iter->dev);
-	}
 	xnvme_dev_close(iter->dev);
 	free(iter->entries);
 	free(iter->buffers);
-	free(iter->slbas);
-	free(iter->elbas);
 	free(iter->stats);
 	free(iter);
 }
@@ -363,10 +504,10 @@ sil_init(struct sil_iter **iter, const char *dev_uri, struct sil_opts *opts)
 		goto exit;
 	}
 
-	if (!_iter->gpu) {
-		_iter->io_fn = sil_cpu_submit;
-	} else {
+	if (_iter->gpu) {
 		_iter->io_fn = sil_gpu_submit;
+	} else {
+		_iter->io_fn = sil_cpu_submit;
 	}
 
 	_iter->stats = malloc(sizeof(struct sil_stats));
@@ -387,7 +528,11 @@ sil_init(struct sil_iter **iter, const char *dev_uri, struct sil_opts *opts)
 		goto exit;
 	}
 
-	err = _alloc(_iter);
+	if (_iter->gpu) {
+		err = _alloc_gpu(_iter);
+	} else {
+		err = _alloc_cpu(_iter);
+	}
 	if (err) {
 		sil_term(_iter);
 		return err;
@@ -423,49 +568,11 @@ exit:
 int
 sil_next(struct sil_iter *iter, void ***buffers)
 {
-	struct sil_entry entry;
-	struct xal_inode dir;
-	struct xal_inode file;
-	struct xal_extent extent, next_extent;
-	uint64_t nblocks, nbytes, blocksize, slba;
-
 	int err;
 
 	if (iter->index >= iter->n_entries) {
 		iter->index = 0;
 		_shuffle_entries(iter);
-	}
-
-	blocksize = xnvme_dev_get_geo(iter->dev)->lba_nbytes;
-
-	for (uint32_t i = 0; i < iter->batch_size; i++) {
-		entry = iter->entries[iter->index++ % iter->n_entries];
-
-		dir = iter->root_inode->content.dentries.inodes[entry.dir];
-		file = dir.content.dentries.inodes[entry.file];
-		extent = file.content.extents.extent[0];
-		iter->slbas[i] = xal_fsbno_offset(iter->xal, extent.start_block) / blocksize;
-
-		nbytes = extent.nblocks * iter->xal->sb.blocksize;
-		nblocks = nbytes / blocksize;
-
-		for (uint32_t j = 1; j < file.content.extents.count; j++) {
-			next_extent = file.content.extents.extent[j];
-			slba = xal_fsbno_offset(iter->xal, next_extent.start_block) / blocksize;
-			if (slba != iter->slbas[i] + nblocks) {
-				fprintf(stderr,
-					"File: %s, in dir: %s, has non contiguous extents\n",
-					file.name, dir.name);
-				fprintf(stderr, "extent[%d].elba: %lu, extent[%d].slba: %lu\n",
-					j - 1, iter->slbas[i] + nblocks - 1, j, slba);
-				return ENOTSUP;
-			}
-			nbytes += next_extent.nblocks * iter->xal->sb.blocksize;
-			nblocks = nbytes / blocksize;
-		}
-		iter->elbas[i] = iter->slbas[i] + nblocks - 1;
-		iter->stats->io += nblocks / (iter->nlb + 1);
-		iter->stats->bytes += nbytes;
 	}
 
 	err = iter->io_fn(iter);
