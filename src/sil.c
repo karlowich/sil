@@ -353,7 +353,10 @@ sil_cpu_submit(struct sil_iter *iter)
 	struct xal_inode file;
 	struct xal_extent extent, next_extent;
 	uint64_t nblocks, nbytes, blocksize, next_slba;
+	struct timespec start, end;
+	int err;
 
+	clock_gettime(CLOCK_MONOTONIC_RAW, &start);
 	blocksize = xnvme_dev_get_geo(iter->dev)->lba_nbytes;
 	for (uint32_t i = 0; i < iter->batch_size; i++) {
 		entry = iter->entries[iter->index++ % iter->n_entries];
@@ -386,9 +389,18 @@ sil_cpu_submit(struct sil_iter *iter)
 		iter->stats->io += nblocks / (iter->nlb + 1);
 		iter->stats->bytes += nbytes;
 	}
-	return xnvme_io_range_submit(iter->queue, XNVME_SPEC_NVM_OPC_READ, iter->cpu_io->slbas,
-				     iter->cpu_io->elbas, iter->nlb, iter->nbytes, iter->buffers,
-				     iter->batch_size);
+	clock_gettime(CLOCK_MONOTONIC_RAW, &end);
+	iter->stats->prep_time += (double)(end.tv_sec - start.tv_sec) +
+				  (double)(end.tv_nsec - start.tv_nsec) / 1000000000.f;
+
+	clock_gettime(CLOCK_MONOTONIC_RAW, &start);
+	err = xnvme_io_range_submit(iter->queue, XNVME_SPEC_NVM_OPC_READ, iter->cpu_io->slbas,
+				    iter->cpu_io->elbas, iter->nlb, iter->nbytes, iter->buffers,
+				    iter->batch_size);
+	clock_gettime(CLOCK_MONOTONIC_RAW, &end);
+	iter->stats->io_time += (double)(end.tv_sec - start.tv_sec) +
+				(double)(end.tv_nsec - start.tv_nsec) / 1000000000.f;
+	return err;
 }
 
 int
@@ -399,8 +411,10 @@ sil_gpu_submit(struct sil_iter *iter)
 	struct xal_inode file;
 	struct xal_extent extent, next_extent;
 	uint64_t nblocks, nbytes, blocksize, cur_slba, next_slba, n_io = 0;
+	struct timespec start, end;
 	int err;
 
+	clock_gettime(CLOCK_MONOTONIC_RAW, &start);
 	blocksize = xnvme_dev_get_geo(iter->dev)->lba_nbytes;
 	for (uint32_t i = 0; i < iter->batch_size; i++) {
 		entry = iter->entries[iter->index++ % iter->n_entries];
@@ -439,7 +453,11 @@ sil_gpu_submit(struct sil_iter *iter)
 	}
 	iter->stats->io += n_io;
 	iter->gpu_io->n_io = n_io;
+	clock_gettime(CLOCK_MONOTONIC_RAW, &end);
+	iter->stats->prep_time += (double)(end.tv_sec - start.tv_sec) +
+				  (double)(end.tv_nsec - start.tv_nsec) / 1000000000.f;
 
+	clock_gettime(CLOCK_MONOTONIC_RAW, &start);
 	err = xnvme_gpu_io_submit(GPU_GSIZE, GPU_TBSIZE, iter->dev, XNVME_SPEC_NVM_OPC_READ,
 				  iter->nlb, iter->nbytes, iter->gpu_io);
 	if (err) {
@@ -452,6 +470,9 @@ sil_gpu_submit(struct sil_iter *iter)
 		fprintf(stderr, "Error synchronizing kernels: %d\n", err);
 		return err;
 	}
+	clock_gettime(CLOCK_MONOTONIC_RAW, &end);
+	iter->stats->io_time += (double)(end.tv_sec - start.tv_sec) +
+				(double)(end.tv_nsec - start.tv_nsec) / 1000000000.f;
 	return 0;
 }
 
@@ -518,6 +539,8 @@ sil_init(struct sil_iter **iter, const char *dev_uri, struct sil_opts *opts)
 	}
 	_iter->stats->bytes = 0;
 	_iter->stats->io = 0;
+	_iter->stats->io_time = 0;
+	_iter->stats->prep_time = 0;
 	_iter->stats->n_files = 0;
 	_iter->stats->max_file_size = 0;
 	_iter->stats->avg_file_size = 0;

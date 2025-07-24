@@ -41,6 +41,8 @@ struct sil_opts {
 struct sil_stats {
 	uint64_t bytes;		///< Total number of bytes read
 	uint64_t io;		///< Total number of commands sent
+	double io_time;		///< The total time spent doing IO
+	double prep_time;	/// The total time spent preparing for doing IO
 	uint64_t n_files;	///< Number of files in the dataset
 	uint64_t max_file_size; ///< Maximum size of files in the dataset
 	double avg_file_size;	///< Average size of files in the dataset
