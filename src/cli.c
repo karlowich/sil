@@ -113,14 +113,17 @@ main(int argc, char *argv[])
 	       (double)(end.tv_nsec - start.tv_nsec) / 1000000000.f;
 
 	stats = sil_get_stats(iter);
-	printf("Seconds: %lf\n", time);
-	printf("File/s: %lf\n", (args.batches * opts.batch_size) / time);
-	printf("MiB/s: %lf\n", (stats->bytes / 1024.f / 1024.f) / time);
-	printf("IOPS: %lf\n", stats->io / time);
-
-	printf("\nNumber of files in the dataset: %lu\n", stats->n_files);
-	printf("Maximum size of files in the dataset (KiB): %lu\n", stats->max_file_size/1024);
-	printf("Average size of files in the dataset (KiB): %lf\n", stats->avg_file_size/1024);
+	printf("IO stats:\n");
+	printf("\tTotal time: %lf\n", time);
+	printf("\tPrep time: %lf\n", stats->prep_time);
+	printf("\tIO time: %lf\n", stats->io_time);
+	printf("\tFile/s: %lf\n", (args.batches * opts.batch_size) / time);
+	printf("\tMiB/s: %lf\n", (stats->bytes / 1024.f / 1024.f) / time);
+	printf("\tIOPS: %lf\n", stats->io / time);
+	printf("Dataset stats:\n");
+	printf("\tNumber of files in the dataset: %lu\n", stats->n_files);
+	printf("\tMaximum size of files in the dataset (KiB): %lu\n", stats->max_file_size / 1024);
+	printf("\tAverage size of files in the dataset (KiB): %lf\n", stats->avg_file_size / 1024);
 
 	sil_term(iter);
 
