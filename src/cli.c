@@ -120,6 +120,7 @@ main(int argc, char *argv[])
 	printf("\tFile/s: %lf\n", (args.batches * opts.batch_size) / time);
 	printf("\tMiB/s: %lf\n", (stats->bytes / 1024.f / 1024.f) / time);
 	printf("\tIOPS: %lf\n", stats->io / time);
+	printf("\tNumber of IOs: %lu\n", stats->io);
 	printf("Dataset stats:\n");
 	printf("\tNumber of files in the dataset: %lu\n", stats->n_files);
 	printf("\tMaximum size of files in the dataset (KiB): %lu\n", stats->max_file_size / 1024);
