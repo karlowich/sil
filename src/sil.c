@@ -25,6 +25,12 @@ struct sil_entry {
 	uint64_t file;
 };
 
+struct sil_data {
+	struct sil_entry *entries;
+	uint64_t n_entries;
+	uint64_t index;
+};
+
 struct sil_cpu_io {
 	uint64_t *slbas;
 	uint64_t *elbas;
@@ -33,7 +39,7 @@ struct sil_cpu_io {
 struct sil_iter {
 	struct xnvme_dev *dev;
 	struct xnvme_queue *queue;
-	struct sil_entry *entries;
+	struct sil_data *data;
 	struct sil_stats *stats;
 	struct xal *xal;
 	struct xal_inode *root_inode;
@@ -45,8 +51,6 @@ struct sil_iter {
 	uint32_t batch_size;
 	uint32_t nlb;
 	uint64_t nbytes;
-	uint64_t index;
-	uint64_t n_entries;
 	uint64_t buffer_size;
 	bool gpu;
 };
@@ -220,12 +224,19 @@ _xal_setup(struct sil_iter *iter, const char *root_dir)
 static int
 _create_entries(struct sil_iter *iter)
 {
+	struct sil_data *data;
 	struct sil_entry *entries;
 	struct xal_dentries root_dentries = iter->root_inode->content.dentries;
 	uint64_t n_entries = 0;
 	int err;
 	int k;
 
+	data = malloc(sizeof(struct sil_data));
+	if (!data) {
+		err = errno;
+		fprintf(stderr, "Could not allocate data: %d\n", err);
+		return err;
+	}
 	for (uint32_t i = 0; i < root_dentries.count; i++) {
 		n_entries += root_dentries.inodes[i].content.dentries.count;
 	}
@@ -246,8 +257,10 @@ _create_entries(struct sil_iter *iter)
 		}
 	}
 
-	iter->entries = entries;
-	iter->n_entries = n_entries;
+	iter->data = data;
+	iter->data->entries = entries;
+	iter->data->n_entries = n_entries;
+	iter->data->index = 0;
 
 	return 0;
 }
@@ -261,14 +274,14 @@ _swap_entries(struct sil_entry *entries, int a, int b)
 }
 
 static void
-_shuffle_entries(struct sil_iter *iter)
+_shuffle_data(struct sil_data *data)
 {
 	int n;
 
 	// Knuth-Fisher-Yates
-	for (int i = iter->n_entries - 1; i > 0; i--) {
+	for (int i = data->n_entries - 1; i > 0; i--) {
 		n = rand() % (i + 1);
-		_swap_entries(iter->entries, i, n);
+		_swap_entries(data->entries, i, n);
 	}
 }
 
@@ -359,7 +372,7 @@ sil_cpu_submit(struct sil_iter *iter)
 	clock_gettime(CLOCK_MONOTONIC_RAW, &start);
 	blocksize = xnvme_dev_get_geo(iter->dev)->lba_nbytes;
 	for (uint32_t i = 0; i < iter->batch_size; i++) {
-		entry = iter->entries[iter->index++ % iter->n_entries];
+		entry = iter->data->entries[iter->data->index++ % iter->data->n_entries];
 
 		dir = iter->root_inode->content.dentries.inodes[entry.dir];
 		file = dir.content.dentries.inodes[entry.file];
@@ -417,7 +430,7 @@ sil_gpu_submit(struct sil_iter *iter)
 	clock_gettime(CLOCK_MONOTONIC_RAW, &start);
 	blocksize = xnvme_dev_get_geo(iter->dev)->lba_nbytes;
 	for (uint32_t i = 0; i < iter->batch_size; i++) {
-		entry = iter->entries[iter->index++ % iter->n_entries];
+		entry = iter->data->entries[iter->data->index++ % iter->data->n_entries];
 
 		dir = iter->root_inode->content.dentries.inodes[entry.dir];
 		file = dir.content.dentries.inodes[entry.file];
@@ -496,7 +509,8 @@ sil_term(struct sil_iter *iter)
 	}
 	xal_close(iter->xal);
 	xnvme_dev_close(iter->dev);
-	free(iter->entries);
+	free(iter->data->entries);
+	free(iter->data);
 	free(iter->buffers);
 	free(iter->stats);
 	free(iter);
@@ -518,7 +532,6 @@ sil_init(struct sil_iter **iter, const char *dev_uri, struct sil_opts *opts)
 	_iter->batch_size = opts->batch_size;
 	_iter->nlb = opts->nlb;
 	_iter->nbytes = opts->nbytes;
-	_iter->index = 0;
 
 	err = _xnvme_setup(_iter, dev_uri, opts->backend, opts->queue_depth);
 	if (err) {
@@ -577,7 +590,7 @@ sil_init(struct sil_iter **iter, const char *dev_uri, struct sil_opts *opts)
 
 	// Shuffle the entries
 	srand(time(NULL));
-	_shuffle_entries(_iter);
+	_shuffle_data(_iter->data);
 
 	(*iter) = _iter;
 
@@ -593,9 +606,9 @@ sil_next(struct sil_iter *iter, void ***buffers)
 {
 	int err;
 
-	if (iter->index >= iter->n_entries) {
-		iter->index = 0;
-		_shuffle_entries(iter);
+	if (iter->data->index >= iter->data->n_entries) {
+		iter->data->index = 0;
+		_shuffle_data(iter->data);
 	}
 
 	err = iter->io_fn(iter);
