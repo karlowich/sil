@@ -7,14 +7,15 @@
 #include <time.h>
 
 struct sil_cli_args {
-	char *dev_uri;
+	char *dev_uris;
 	uint32_t batches;
+	uint32_t n_devs;
 };
 
 void
 print_help(const char *name)
 {
-	fprintf(stderr, "Usage: %s <device uri> [<args>] \n", name);
+	fprintf(stderr, "Usage: %s <comma-separated device uris> [<args>] \n", name);
 	fprintf(stderr, "Where <args> include \n");
 	fprintf(stderr, "\t --root-dir \t | \t A directory containing subdirectories with files\n");
 	fprintf(stderr, "\t \t \t | \t The root dir should be a name of a directory, not a path\n");
@@ -55,8 +56,12 @@ parse_args(int argc, char *argv[], struct sil_cli_args *args, struct sil_opts *o
 		} else if (strcmp(argv[i], "--help") == 0) {
 			print_help(argv[0]);
 			exit(0);
-		} else if (args->dev_uri == NULL) {
-			args->dev_uri = argv[i];
+		} else if (args->dev_uris == NULL) {
+			args->dev_uris = argv[i];
+			args->n_devs = 1;
+			for (int i = 0; args->dev_uris[i]; i++) {
+				args->n_devs += (args->dev_uris[i] == ',');
+			}
 		} else {
 			fprintf(stderr, "Unexpected argument: %s\n", argv[i]);
 			return -EINVAL;
@@ -67,7 +72,7 @@ parse_args(int argc, char *argv[], struct sil_cli_args *args, struct sil_opts *o
 		args->batches = 1;
 	}
 
-	if (args->dev_uri == NULL) {
+	if (args->dev_uris == NULL) {
 		fprintf(stderr, "Error: device uri is required\n");
 		return -EINVAL;
 	}
@@ -84,6 +89,7 @@ main(int argc, char *argv[])
 	struct timespec start, end;
 	struct sil_iter *iter;
 	void **buffers;
+	char **dev_uris;
 	double time;
 	int err;
 
@@ -93,12 +99,21 @@ main(int argc, char *argv[])
 		return err;
 	}
 
-	err = sil_init(&iter, args.dev_uri, &opts);
+	dev_uris = malloc(sizeof(char *) * args.n_devs);
+	if (!dev_uris) {
+		err = errno;
+		fprintf(stderr, "Allocating memory for device URIs failed: %d\n", err);
+		return err;
+	}
+	dev_uris[0] = strtok(args.dev_uris, ",");
+	for (uint32_t i = 1; i < args.n_devs; i++) {
+		dev_uris[i] = strtok(NULL, ",");
+	}
+	err = sil_init(&iter, dev_uris, args.n_devs, &opts);
 	if (err) {
 		fprintf(stderr, "Initialzing iterator failed, err: %d\n", err);
 		return err;
 	}
-
 	clock_gettime(CLOCK_MONOTONIC_RAW, &start);
 	for (uint32_t i = 0; i < args.batches; i++) {
 		err = sil_next(iter, &buffers);

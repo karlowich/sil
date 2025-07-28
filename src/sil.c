@@ -36,20 +36,28 @@ struct sil_cpu_io {
 	uint64_t *elbas;
 };
 
-struct sil_iter {
+struct sil_dev {
 	struct xnvme_dev *dev;
 	struct xnvme_queue *queue;
-	struct sil_data *data;
-	struct sil_stats *stats;
 	struct xal *xal;
 	struct xal_inode *root_inode;
 	struct xnvme_gpu_io *gpu_io;
 	struct sil_cpu_io *cpu_io;
 	const char *root_dir;
+	void **buffers;
+	uint32_t n_buffers;
+};
+
+struct sil_iter {
+	struct sil_dev **devs;
+	struct sil_data *data;
+	struct sil_stats *stats;
+	const char *root_dir;
 	int (*io_fn)(struct sil_iter *iter);
 	void **buffers;
 	uint32_t batch_size;
 	uint32_t nlb;
+	uint32_t n_devs;
 	uint64_t nbytes;
 	uint64_t buffer_size;
 	bool gpu;
@@ -67,7 +75,8 @@ inode_cmp(const void *a, const void *b)
 }
 
 static int
-_xnvme_setup(struct sil_iter *iter, const char *uri, const char *backend, uint32_t queue_depth)
+_xnvme_setup(struct sil_iter *iter, struct sil_dev *device, const char *uri, const char *backend,
+	     uint32_t queue_depth)
 {
 	struct xnvme_opts opts = xnvme_opts_default();
 	struct xnvme_dev *dev;
@@ -115,7 +124,7 @@ _xnvme_setup(struct sil_iter *iter, const char *uri, const char *backend, uint32
 			return err;
 		}
 	} else {
-		err = xnvme_queue_init(dev, queue_depth, 0, &iter->queue);
+		err = xnvme_queue_init(dev, queue_depth, 0, &device->queue);
 		if (err) {
 			xnvme_dev_close(dev);
 			fprintf(stderr, "xnvme_queue_init(): %d\n", err);
@@ -123,7 +132,7 @@ _xnvme_setup(struct sil_iter *iter, const char *uri, const char *backend, uint32
 		}
 	}
 
-	iter->dev = dev;
+	device->dev = dev;
 	return 0;
 }
 
@@ -147,10 +156,10 @@ static int
 find_root_dir(struct xal *SIL_UNUSED(xal), struct xal_inode *inode, void *cb_args,
 	      int SIL_UNUSED(level))
 {
-	struct sil_iter *iter = (struct sil_iter *)cb_args;
+	struct sil_dev *dev = (struct sil_dev *)cb_args;
 
-	if (strcmp(iter->root_dir, inode->name) == 0) {
-		iter->root_inode = inode;
+	if (strcmp(dev->root_dir, inode->name) == 0) {
+		dev->root_inode = inode;
 		return ROOT_DIR_FOUND; // break
 	}
 
@@ -158,12 +167,12 @@ find_root_dir(struct xal *SIL_UNUSED(xal), struct xal_inode *inode, void *cb_arg
 }
 
 static int
-_xal_setup(struct sil_iter *iter, const char *root_dir)
+_xal_setup(struct sil_iter *iter, struct sil_dev *device, const char *root_dir)
 {
 	struct xal *xal;
 	int err;
 
-	err = xal_open(iter->dev, &xal);
+	err = xal_open(device->dev, &xal);
 	if (err) {
 		fprintf(stderr, "xal_open(): %d\n", err);
 		return err;
@@ -184,15 +193,15 @@ _xal_setup(struct sil_iter *iter, const char *root_dir)
 	}
 
 	if (root_dir) {
-		iter->root_dir = root_dir;
+		device->root_dir = root_dir;
 
-		err = xal_walk(xal, xal->root, find_root_dir, iter);
+		err = xal_walk(xal, xal->root, find_root_dir, device);
 		switch (err) {
 		case ROOT_DIR_FOUND:
 			break;
 
 		case 0: // Root dir not found
-			fprintf(stderr, "Couldn't find root directory: %s\n", iter->root_dir);
+			fprintf(stderr, "Couldn't find root directory: %s\n", device->root_dir);
 			xal_close(xal);
 			return ENOENT;
 
@@ -202,22 +211,30 @@ _xal_setup(struct sil_iter *iter, const char *root_dir)
 			return err;
 		}
 	} else {
-		iter->root_inode = xal->root;
+		device->root_inode = xal->root;
 	}
 
-	iter->buffer_size = 0;
-	err = xal_walk(xal, iter->root_inode, find_buffer_size, iter->stats);
-	if (err) {
-		fprintf(stderr, "xal_walk(find_buffer_size): %d\n", err);
-		return err;
+	if (!iter->buffer_size) {
+		iter->buffer_size = 0;
+		err = xal_walk(xal, device->root_inode, find_buffer_size, iter->stats);
+		if (err) {
+			fprintf(stderr, "xal_walk(find_buffer_size): %d\n", err);
+			return err;
+		}
+
+		iter->stats->avg_file_size = iter->stats->avg_file_size / iter->stats->n_files;
+		// Align to page size
+		iter->buffer_size = (1 + ((iter->stats->max_file_size - 1) / xal->sb.blocksize)) *
+				    (xal->sb.blocksize);
 	}
 
-	iter->stats->avg_file_size = iter->stats->avg_file_size / iter->stats->n_files;
-	// Align to page size
-	iter->buffer_size =
-	    (1 + ((iter->stats->max_file_size - 1) / xal->sb.blocksize)) * (xal->sb.blocksize);
-
-	iter->xal = xal;
+	// Sort the directories so we can derive labels
+	if (device->root_inode->content.dentries.count > 1) {
+		qsort(device->root_inode->content.dentries.inodes,
+		      device->root_inode->content.dentries.count, sizeof(struct xal_inode),
+		      inode_cmp);
+	}
+	device->xal = xal;
 	return 0;
 }
 
@@ -226,7 +243,7 @@ _create_entries(struct sil_iter *iter)
 {
 	struct sil_data *data;
 	struct sil_entry *entries;
-	struct xal_dentries root_dentries = iter->root_inode->content.dentries;
+	struct xal_dentries root_dentries = iter->devs[0]->root_inode->content.dentries;
 	uint64_t n_entries = 0;
 	int err;
 	int k;
@@ -286,7 +303,7 @@ _shuffle_data(struct sil_data *data)
 }
 
 static int
-_alloc_cpu(struct sil_iter *iter)
+_alloc(struct sil_iter *iter)
 {
 	int err;
 	iter->buffers = malloc(sizeof(void *) * iter->batch_size);
@@ -296,64 +313,61 @@ _alloc_cpu(struct sil_iter *iter)
 		return err;
 	}
 
-	for (uint32_t i = 0; i < iter->batch_size; i++) {
-		iter->buffers[i] = xnvme_buf_alloc(iter->dev, iter->buffer_size);
-		if (!iter->buffers[i]) {
+	for (uint32_t i = 0; i < iter->n_devs; i++) {
+		struct sil_dev *device = iter->devs[i];
+		device->n_buffers = iter->batch_size / iter->n_devs;
+		device->buffers = malloc(sizeof(void *) * device->n_buffers);
+		if (!device->buffers) {
 			err = errno;
-			fprintf(stderr, "Could not allocate buffers[%d]: %d\n", i, err);
+			fprintf(stderr, "Could not allocate array of buffers: %d\n", err);
 			return err;
 		}
-	}
-
-	iter->cpu_io = malloc(sizeof(struct sil_cpu_io));
-	if (!iter->cpu_io) {
-		err = errno;
-		fprintf(stderr, "Could not allocate IO struct: %d\n", err);
-		return err;
-	}
-
-	iter->cpu_io->slbas = malloc(sizeof(uint64_t) * iter->batch_size);
-	if (!iter->cpu_io->slbas) {
-		err = errno;
-		fprintf(stderr, "Could not allocate array for slbas: %d\n", err);
-		return err;
-	}
-
-	iter->cpu_io->elbas = malloc(sizeof(uint64_t) * iter->batch_size);
-	if (!iter->cpu_io->elbas) {
-		err = errno;
-		fprintf(stderr, "Could not allocate array for elbas: %d\n", err);
-		return err;
-	}
-
-	return 0;
-}
-
-static int
-_alloc_gpu(struct sil_iter *iter)
-{
-	int err;
-	iter->buffers = malloc(sizeof(void *) * iter->batch_size);
-	if (!iter->buffers) {
-		err = errno;
-		fprintf(stderr, "Could not allocate array of buffers: %d\n", err);
-		return err;
-	}
-
-	for (uint32_t i = 0; i < iter->batch_size; i++) {
-		iter->buffers[i] = xnvme_gpu_alloc(iter->dev, iter->buffer_size);
-		if (!iter->buffers[i]) {
-			err = errno;
-			fprintf(stderr, "Could not allocate buffers[%d]: %d\n", i, err);
-			return err;
+		for (uint32_t j = 0; j < device->n_buffers; j++) {
+			if (iter->gpu) {
+				device->buffers[j] =
+				    xnvme_gpu_alloc(device->dev, iter->buffer_size);
+			} else {
+				device->buffers[j] =
+				    xnvme_buf_alloc(device->dev, iter->buffer_size);
+			}
+			if (!device->buffers[j]) {
+				err = errno;
+				fprintf(stderr, "Could not allocate buffers[%d]: %d\n", i, err);
+				return err;
+			}
+			iter->buffers[j + i * device->n_buffers] = device->buffers[j];
 		}
-	}
 
-	err = xnvme_gpu_io_alloc(&iter->gpu_io,
-				 (iter->buffer_size / iter->nbytes) * iter->batch_size);
-	if (err) {
-		fprintf(stderr, "Could not allocate IO struct: %d\n", err);
-		return err;
+		if (iter->gpu) {
+			err =
+			    xnvme_gpu_io_alloc(&device->gpu_io, (iter->buffer_size / iter->nbytes) *
+								    device->n_buffers);
+			if (err) {
+				fprintf(stderr, "Could not allocate IO struct: %d\n", err);
+				return err;
+			}
+		} else {
+			device->cpu_io = malloc(sizeof(struct sil_cpu_io));
+			if (!device->cpu_io) {
+				err = errno;
+				fprintf(stderr, "Could not allocate IO struct: %d\n", err);
+				return err;
+			}
+
+			device->cpu_io->slbas = malloc(sizeof(uint64_t) * device->n_buffers);
+			if (!device->cpu_io->slbas) {
+				err = errno;
+				fprintf(stderr, "Could not allocate array for slbas: %d\n", err);
+				return err;
+			}
+
+			device->cpu_io->elbas = malloc(sizeof(uint64_t) * device->n_buffers);
+			if (!device->cpu_io->elbas) {
+				err = errno;
+				fprintf(stderr, "Could not allocate array for elbas: %d\n", err);
+				return err;
+			}
+		}
 	}
 	return 0;
 }
@@ -369,51 +383,62 @@ sil_cpu_submit(struct sil_iter *iter)
 	struct timespec start, end;
 	int err;
 
-	clock_gettime(CLOCK_MONOTONIC_RAW, &start);
-	blocksize = xnvme_dev_get_geo(iter->dev)->lba_nbytes;
-	for (uint32_t i = 0; i < iter->batch_size; i++) {
-		entry = iter->data->entries[iter->data->index++ % iter->data->n_entries];
+	for (uint32_t i = 0; i < iter->n_devs; i++) {
+		clock_gettime(CLOCK_MONOTONIC_RAW, &start);
+		struct sil_dev *device = iter->devs[i];
+		blocksize = xnvme_dev_get_geo(device->dev)->lba_nbytes;
 
-		dir = iter->root_inode->content.dentries.inodes[entry.dir];
-		file = dir.content.dentries.inodes[entry.file];
-		extent = file.content.extents.extent[0];
-		iter->cpu_io->slbas[i] =
-		    xal_fsbno_offset(iter->xal, extent.start_block) / blocksize;
+		for (uint32_t j = 0; j < device->n_buffers; j++) {
+			entry = iter->data->entries[iter->data->index++ % iter->data->n_entries];
 
-		nbytes = extent.nblocks * iter->xal->sb.blocksize;
-		nblocks = nbytes / blocksize;
+			dir = device->root_inode->content.dentries.inodes[entry.dir];
+			file = dir.content.dentries.inodes[entry.file];
+			extent = file.content.extents.extent[0];
+			device->cpu_io->slbas[j] =
+			    xal_fsbno_offset(device->xal, extent.start_block) / blocksize;
 
-		for (uint32_t j = 1; j < file.content.extents.count; j++) {
-			next_extent = file.content.extents.extent[j];
-			next_slba =
-			    xal_fsbno_offset(iter->xal, next_extent.start_block) / blocksize;
-			if (next_slba != iter->cpu_io->slbas[i] + nblocks) {
-				fprintf(stderr,
-					"File: %s, in dir: %s, has non contiguous extents\n",
-					file.name, dir.name);
-				fprintf(stderr, "extent[%d].elba: %lu, extent[%d].slba: %lu\n",
-					j - 1, iter->cpu_io->slbas[i] + nblocks - 1, j, next_slba);
-				return ENOTSUP;
-			}
-			nbytes += next_extent.nblocks * iter->xal->sb.blocksize;
+			nbytes = extent.nblocks * device->xal->sb.blocksize;
 			nblocks = nbytes / blocksize;
-		}
-		iter->cpu_io->elbas[i] = iter->cpu_io->slbas[i] + nblocks - 1;
-		iter->stats->io += nblocks / (iter->nlb + 1);
-		iter->stats->bytes += nbytes;
-	}
-	clock_gettime(CLOCK_MONOTONIC_RAW, &end);
-	iter->stats->prep_time += (double)(end.tv_sec - start.tv_sec) +
-				  (double)(end.tv_nsec - start.tv_nsec) / 1000000000.f;
 
-	clock_gettime(CLOCK_MONOTONIC_RAW, &start);
-	err = xnvme_io_range_submit(iter->queue, XNVME_SPEC_NVM_OPC_READ, iter->cpu_io->slbas,
-				    iter->cpu_io->elbas, iter->nlb, iter->nbytes, iter->buffers,
-				    iter->batch_size);
-	clock_gettime(CLOCK_MONOTONIC_RAW, &end);
-	iter->stats->io_time += (double)(end.tv_sec - start.tv_sec) +
-				(double)(end.tv_nsec - start.tv_nsec) / 1000000000.f;
-	return err;
+			for (uint32_t k = 1; k < file.content.extents.count; k++) {
+				next_extent = file.content.extents.extent[k];
+				next_slba = xal_fsbno_offset(device->xal, next_extent.start_block) /
+					    blocksize;
+				if (next_slba != device->cpu_io->slbas[j] + nblocks) {
+					fprintf(
+					    stderr,
+					    "File: %s, in dir: %s, has non contiguous extents\n",
+					    file.name, dir.name);
+					fprintf(stderr,
+						"extent[%d].elba: %lu, extent[%d].slba: %lu\n",
+						k - 1, device->cpu_io->slbas[j] + nblocks - 1, k,
+						next_slba);
+					return ENOTSUP;
+				}
+				nbytes += next_extent.nblocks * device->xal->sb.blocksize;
+				nblocks = nbytes / blocksize;
+			}
+			device->cpu_io->elbas[j] = device->cpu_io->slbas[j] + nblocks - 1;
+			iter->stats->io += nblocks / (iter->nlb + 1);
+			iter->stats->bytes += nbytes;
+		}
+		clock_gettime(CLOCK_MONOTONIC_RAW, &end);
+		iter->stats->prep_time += (double)(end.tv_sec - start.tv_sec) +
+					  (double)(end.tv_nsec - start.tv_nsec) / 1000000000.f;
+
+		clock_gettime(CLOCK_MONOTONIC_RAW, &start);
+		err = xnvme_io_range_submit(device->queue, XNVME_SPEC_NVM_OPC_READ,
+					    device->cpu_io->slbas, device->cpu_io->elbas, iter->nlb,
+					    iter->nbytes, iter->buffers, device->n_buffers);
+		clock_gettime(CLOCK_MONOTONIC_RAW, &end);
+		iter->stats->io_time += (double)(end.tv_sec - start.tv_sec) +
+					(double)(end.tv_nsec - start.tv_nsec) / 1000000000.f;
+		if (err) {
+			fprintf(stderr, "IO failed: %d", err);
+			return err;
+		}
+	}
+	return 0;
 }
 
 int
@@ -423,61 +448,69 @@ sil_gpu_submit(struct sil_iter *iter)
 	struct xal_inode dir;
 	struct xal_inode file;
 	struct xal_extent extent, next_extent;
-	uint64_t nblocks, nbytes, blocksize, cur_slba, next_slba, n_io = 0;
+	uint64_t nblocks, nbytes, blocksize, cur_slba, next_slba, n_io;
 	struct timespec start, end;
 	int err;
 
-	clock_gettime(CLOCK_MONOTONIC_RAW, &start);
-	blocksize = xnvme_dev_get_geo(iter->dev)->lba_nbytes;
-	for (uint32_t i = 0; i < iter->batch_size; i++) {
-		entry = iter->data->entries[iter->data->index++ % iter->data->n_entries];
+	for (uint32_t i = 0; i < iter->n_devs; i++) {
+		clock_gettime(CLOCK_MONOTONIC_RAW, &start);
+		struct sil_dev *device = iter->devs[i];
+		blocksize = xnvme_dev_get_geo(device->dev)->lba_nbytes;
+		n_io = 0;
 
-		dir = iter->root_inode->content.dentries.inodes[entry.dir];
-		file = dir.content.dentries.inodes[entry.file];
-		extent = file.content.extents.extent[0];
+		for (uint32_t j = 0; j < device->n_buffers; j++) {
+			entry = iter->data->entries[iter->data->index++ % iter->data->n_entries];
 
-		cur_slba = xal_fsbno_offset(iter->xal, extent.start_block) / blocksize;
-		nbytes = extent.nblocks * iter->xal->sb.blocksize;
-		nblocks = nbytes / blocksize;
+			dir = device->root_inode->content.dentries.inodes[entry.dir];
+			file = dir.content.dentries.inodes[entry.file];
+			extent = file.content.extents.extent[0];
 
-		for (uint32_t j = 1; j < file.content.extents.count; j++) {
-			next_extent = file.content.extents.extent[j];
-			next_slba =
-			    xal_fsbno_offset(iter->xal, next_extent.start_block) / blocksize;
-			if (next_slba != cur_slba + nblocks) {
-				fprintf(stderr,
-					"File: %s, in dir: %s, has non contiguous extents\n",
-					file.name, dir.name);
-				fprintf(stderr, "extent[%d].elba: %lu, extent[%d].slba: %lu\n",
-					j - 1, cur_slba + nblocks - 1, j, next_slba);
-				return ENOTSUP;
-			}
-			nbytes += next_extent.nblocks * iter->xal->sb.blocksize;
+			cur_slba = xal_fsbno_offset(device->xal, extent.start_block) / blocksize;
+			nbytes = extent.nblocks * device->xal->sb.blocksize;
 			nblocks = nbytes / blocksize;
-		}
-		iter->stats->bytes += nbytes;
 
-		for (uint64_t j = 0; j < nblocks / (iter->nlb + 1); j++) {
-			iter->gpu_io->offsets[n_io] = j * (iter->nlb + 1);
-			iter->gpu_io->slbas[n_io] = cur_slba + iter->gpu_io->offsets[n_io];
-			iter->gpu_io->buffers[n_io] = iter->buffers[i];
-			n_io++;
+			for (uint32_t k = 1; k < file.content.extents.count; k++) {
+				next_extent = file.content.extents.extent[k];
+				next_slba = xal_fsbno_offset(device->xal, next_extent.start_block) /
+					    blocksize;
+				if (next_slba != cur_slba + nblocks) {
+					fprintf(
+					    stderr,
+					    "File: %s, in dir: %s, has non contiguous extents\n",
+					    file.name, dir.name);
+					fprintf(stderr,
+						"extent[%d].elba: %lu, extent[%d].slba: %lu\n",
+						k - 1, cur_slba + nblocks - 1, k, next_slba);
+					return ENOTSUP;
+				}
+				nbytes += next_extent.nblocks * device->xal->sb.blocksize;
+				nblocks = nbytes / blocksize;
+			}
+			iter->stats->bytes += nbytes;
+
+			for (uint64_t k = 0; k < nblocks / (iter->nlb + 1); k++) {
+				device->gpu_io->offsets[n_io] = k * (iter->nlb + 1);
+				device->gpu_io->slbas[n_io] =
+				    cur_slba + device->gpu_io->offsets[n_io];
+				device->gpu_io->buffers[n_io] = device->buffers[j];
+				n_io++;
+			}
+		}
+		iter->stats->io += n_io;
+		device->gpu_io->n_io = n_io;
+		clock_gettime(CLOCK_MONOTONIC_RAW, &end);
+		iter->stats->prep_time += (double)(end.tv_sec - start.tv_sec) +
+					  (double)(end.tv_nsec - start.tv_nsec) / 1000000000.f;
+
+		err =
+		    xnvme_gpu_io_submit(GPU_GSIZE/iter->n_devs, GPU_TBSIZE/iter->n_devs, device->dev, XNVME_SPEC_NVM_OPC_READ,
+					iter->nlb, iter->nbytes, device->gpu_io);
+		if (err) {
+			fprintf(stderr, "Could not launch kernel: %d\n", err);
+			return err;
 		}
 	}
-	iter->stats->io += n_io;
-	iter->gpu_io->n_io = n_io;
-	clock_gettime(CLOCK_MONOTONIC_RAW, &end);
-	iter->stats->prep_time += (double)(end.tv_sec - start.tv_sec) +
-				  (double)(end.tv_nsec - start.tv_nsec) / 1000000000.f;
-
 	clock_gettime(CLOCK_MONOTONIC_RAW, &start);
-	err = xnvme_gpu_io_submit(GPU_GSIZE, GPU_TBSIZE, iter->dev, XNVME_SPEC_NVM_OPC_READ,
-				  iter->nlb, iter->nbytes, iter->gpu_io);
-	if (err) {
-		fprintf(stderr, "Could not launch kernel: %d\n", err);
-		return err;
-	}
-
 	err = xnvme_gpu_sync();
 	if (err) {
 		fprintf(stderr, "Error synchronizing kernels: %d\n", err);
@@ -492,23 +525,32 @@ sil_gpu_submit(struct sil_iter *iter)
 void
 sil_term(struct sil_iter *iter)
 {
-	if (iter->gpu) {
-		for (uint32_t i = 0; i < iter->batch_size; i++) {
-			xnvme_gpu_free(iter->dev, iter->buffers[i]);
+	for (uint32_t i = 0; i < iter->n_devs; i++) {
+		struct sil_dev *device = iter->devs[i];
+		if (iter->gpu) {
+			for (uint32_t j = 0; j < device->n_buffers; j++) {
+				xnvme_gpu_free(device->dev, device->buffers[j]);
+			}
+			xnvme_gpu_delete_queues(device->dev);
+		} else {
+			for (uint32_t j = 0; j < device->n_buffers; j++) {
+				xnvme_buf_free(device->dev, device->buffers[j]);
+			}
+			xnvme_queue_term(device->queue);
 		}
-		xnvme_gpu_delete_queues(iter->dev);
-		xnvme_gpu_io_free(iter->gpu_io);
-	} else {
-		for (uint32_t i = 0; i < iter->batch_size; i++) {
-			xnvme_buf_free(iter->dev, iter->buffers[i]);
+		xal_close(device->xal);
+		xnvme_dev_close(device->dev);
+		if (iter->gpu) {
+			xnvme_gpu_io_free(device->gpu_io);
+		} else {
+			free(device->cpu_io);
+			free(device->cpu_io->slbas);
+			free(device->cpu_io->elbas);
 		}
-		free(iter->cpu_io);
-		free(iter->cpu_io->slbas);
-		free(iter->cpu_io->elbas);
-		xnvme_queue_term(iter->queue);
+		free(device->buffers);
+		free(device);
 	}
-	xal_close(iter->xal);
-	xnvme_dev_close(iter->dev);
+
 	free(iter->data->entries);
 	free(iter->data);
 	free(iter->buffers);
@@ -538,10 +580,15 @@ _init_stats(struct sil_stats **stats)
 }
 
 int
-sil_init(struct sil_iter **iter, const char *dev_uri, struct sil_opts *opts)
+sil_init(struct sil_iter **iter, const char **dev_uris, uint32_t n_devs, struct sil_opts *opts)
 {
 	struct sil_iter *_iter;
 	int err;
+
+	if (opts->batch_size % n_devs != 0) {
+		fprintf(stderr, "Batch size (%u) not divisible by number of devices (%u)\n",
+			opts->batch_size, n_devs);
+	}
 
 	_iter = malloc(sizeof(struct sil_iter));
 	if (!_iter) {
@@ -553,10 +600,44 @@ sil_init(struct sil_iter **iter, const char *dev_uri, struct sil_opts *opts)
 	_iter->batch_size = opts->batch_size;
 	_iter->nlb = opts->nlb;
 	_iter->nbytes = opts->nbytes;
+	_iter->n_devs = 0;
 
-	err = _xnvme_setup(_iter, dev_uri, opts->backend, opts->queue_depth);
+	_iter->devs = malloc(sizeof(struct sil_dev *) * n_devs);
+	if (!_iter->devs) {
+		err = errno;
+		fprintf(stderr, "Could not allocate devices: %d\n", err);
+		sil_term(_iter);
+		return err;
+	}
+
+	err = _init_stats(&_iter->stats);
 	if (err) {
-		goto exit;
+		sil_term(_iter);
+		return err;
+	}
+
+	for (uint32_t i = 0; i < n_devs; i++) {
+		struct sil_dev *device = malloc(sizeof(struct sil_dev));
+		if (!device) {
+			err = errno;
+			fprintf(stderr, "Could not allocate device: %d\n", err);
+			sil_term(_iter);
+			return err;
+		}
+
+		err = _xnvme_setup(_iter, device, dev_uris[i], opts->backend, opts->queue_depth);
+		if (err) {
+			sil_term(_iter);
+			return err;
+		}
+		err = _xal_setup(_iter, device, opts->root_dir);
+		if (err) {
+			xnvme_dev_close(device->dev);
+			sil_term(_iter);
+			return err;
+		}
+		_iter->devs[i] = device;
+		_iter->n_devs++;
 	}
 
 	if (_iter->gpu) {
@@ -565,33 +646,10 @@ sil_init(struct sil_iter **iter, const char *dev_uri, struct sil_opts *opts)
 		_iter->io_fn = sil_cpu_submit;
 	}
 
-	err = _init_stats(&_iter->stats);
-	if (err) {
-		xnvme_dev_close(_iter->dev);
-		goto exit;
-	}
-
-	err = _xal_setup(_iter, opts->root_dir);
-	if (err) {
-		xnvme_dev_close(_iter->dev);
-		goto exit;
-	}
-
-	if (_iter->gpu) {
-		err = _alloc_gpu(_iter);
-	} else {
-		err = _alloc_cpu(_iter);
-	}
+	err = _alloc(_iter);
 	if (err) {
 		sil_term(_iter);
 		return err;
-	}
-
-	// Sort the directories so we can derive labels
-	if (_iter->root_inode->content.dentries.count > 1) {
-		qsort(_iter->root_inode->content.dentries.inodes,
-		      _iter->root_inode->content.dentries.count, sizeof(struct xal_inode),
-		      inode_cmp);
 	}
 
 	// Create an entry for every file in every directory
@@ -608,10 +666,6 @@ sil_init(struct sil_iter **iter, const char *dev_uri, struct sil_opts *opts)
 	(*iter) = _iter;
 
 	return 0;
-
-exit:
-	free(_iter);
-	return err;
 }
 
 int

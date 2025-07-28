@@ -77,13 +77,14 @@ sil_get_stats(struct sil_iter *iter);
  * Initialize SIL iterator
  *
  * @param iter Pointer to where to initialize the SIL iterator
- * @param dev_uri Path to a device (eg. /dev/nvme0n1 or 0000:01:00.0)
+ * @param dev_uris Paths to devices (eg. /dev/nvme0n1 or 0000:01:00.0)
+ * @param n_devs The number of devices
  * @param opts Options (struct sil_opts) for the SIL iterator
  *
  * @returns 0 on sucess, otherwise `errno`
  */
 int
-sil_init(struct sil_iter **iter, const char *dev_uri, struct sil_opts *opts);
+sil_init(struct sil_iter **iter, const char **dev_uris, uint32_t n_devs, struct sil_opts *opts);
 
 /**
  * Get the next batch from the SIL iterator
