@@ -516,6 +516,27 @@ sil_term(struct sil_iter *iter)
 	free(iter);
 }
 
+static int
+_init_stats(struct sil_stats **stats)
+{
+	int err;
+	struct sil_stats *_stats = malloc(sizeof(struct sil_stats));
+	if (!_stats) {
+		err = errno;
+		fprintf(stderr, "Could not allocate stats: %d\n", err);
+		return err;
+	}
+	_stats->bytes = 0;
+	_stats->io = 0;
+	_stats->io_time = 0;
+	_stats->prep_time = 0;
+	_stats->n_files = 0;
+	_stats->max_file_size = 0;
+	_stats->avg_file_size = 0;
+	*stats = _stats;
+	return 0;
+}
+
 int
 sil_init(struct sil_iter **iter, const char *dev_uri, struct sil_opts *opts)
 {
@@ -544,19 +565,11 @@ sil_init(struct sil_iter **iter, const char *dev_uri, struct sil_opts *opts)
 		_iter->io_fn = sil_cpu_submit;
 	}
 
-	_iter->stats = malloc(sizeof(struct sil_stats));
-	if (!_iter->stats) {
-		err = errno;
-		fprintf(stderr, "Could not allocate array for elbas: %d\n", err);
-		return err;
+	err = _init_stats(&_iter->stats);
+	if (err) {
+		xnvme_dev_close(_iter->dev);
+		goto exit;
 	}
-	_iter->stats->bytes = 0;
-	_iter->stats->io = 0;
-	_iter->stats->io_time = 0;
-	_iter->stats->prep_time = 0;
-	_iter->stats->n_files = 0;
-	_iter->stats->max_file_size = 0;
-	_iter->stats->avg_file_size = 0;
 
 	err = _xal_setup(_iter, opts->root_dir);
 	if (err) {
