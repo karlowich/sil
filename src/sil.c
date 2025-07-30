@@ -214,7 +214,6 @@ _xal_setup(struct sil_iter *iter, struct sil_dev *device, const char *root_dir)
 	}
 
 	if (!iter->buffer_size) {
-		iter->buffer_size = 0;
 		err = xal_walk(xal, device->root_inode, find_buffer_size, iter->stats);
 		if (err) {
 			fprintf(stderr, "xal_walk(find_buffer_size): %d\n", err);
@@ -601,6 +600,7 @@ sil_init(struct sil_iter **iter, const char **dev_uris, uint32_t n_devs, struct 
 	_iter->nlb = opts->nlb;
 	_iter->nbytes = opts->nbytes;
 	_iter->n_devs = 0;
+	_iter->buffer_size = 0;
 
 	_iter->devs = malloc(sizeof(struct sil_dev *) * n_devs);
 	if (!_iter->devs) {
