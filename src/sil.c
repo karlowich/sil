@@ -17,8 +17,7 @@
 
 #define GPU_NQ 128
 #define GPU_QD 1024
-#define GPU_GSIZE 1024
-#define GPU_TBSIZE 128
+#define GPU_TBSIZE 64
 
 struct sil_entry {
 	uint64_t dir;
@@ -41,7 +40,6 @@ struct sil_dev {
 	struct xnvme_queue *queue;
 	struct xal *xal;
 	struct xal_inode *root_inode;
-	struct xnvme_gpu_io *gpu_io;
 	struct sil_cpu_io *cpu_io;
 	const char *root_dir;
 	void **buffers;
@@ -52,6 +50,7 @@ struct sil_iter {
 	struct sil_dev **devs;
 	struct sil_data *data;
 	struct sil_stats *stats;
+	struct xnvme_gpu_io *gpu_io;
 	const char *root_dir;
 	int (*io_fn)(struct sil_iter *iter);
 	void **buffers;
@@ -338,15 +337,7 @@ _alloc(struct sil_iter *iter)
 			iter->buffers[j + i * device->n_buffers] = device->buffers[j];
 		}
 
-		if (iter->gpu) {
-			err =
-			    xnvme_gpu_io_alloc(&device->gpu_io, (iter->buffer_size / iter->nbytes) *
-								    device->n_buffers);
-			if (err) {
-				fprintf(stderr, "Could not allocate IO struct: %d\n", err);
-				return err;
-			}
-		} else {
+		if (!iter->gpu) {
 			device->cpu_io = malloc(sizeof(struct sil_cpu_io));
 			if (!device->cpu_io) {
 				err = errno;
@@ -367,6 +358,15 @@ _alloc(struct sil_iter *iter)
 				fprintf(stderr, "Could not allocate array for elbas: %d\n", err);
 				return err;
 			}
+		}
+	}
+
+	if (iter->gpu) {
+		err = xnvme_gpu_io_alloc(&iter->gpu_io,
+					 (iter->buffer_size / iter->nbytes) * iter->batch_size);
+		if (err) {
+			fprintf(stderr, "Could not allocate IO struct: %d\n", err);
+			return err;
 		}
 	}
 	return 0;
@@ -448,7 +448,7 @@ sil_gpu_submit(struct sil_iter *iter)
 	struct xal_inode dir;
 	struct xal_inode file;
 	struct xal_extent extent, next_extent;
-	uint64_t nblocks, nbytes, blocksize, cur_slba, next_slba, n_io;
+	uint64_t nblocks, nbytes, blocksize, cur_slba, next_slba, n_io = 0;
 	struct timespec start, end;
 	int err;
 
@@ -456,7 +456,6 @@ sil_gpu_submit(struct sil_iter *iter)
 		clock_gettime(CLOCK_MONOTONIC_RAW, &start);
 		struct sil_dev *device = iter->devs[i];
 		blocksize = xnvme_dev_get_geo(device->dev)->lba_nbytes;
-		n_io = 0;
 
 		for (uint32_t j = 0; j < device->n_buffers; j++) {
 			entry = iter->data->entries[iter->data->index++ % iter->data->n_entries];
@@ -489,28 +488,28 @@ sil_gpu_submit(struct sil_iter *iter)
 			iter->stats->bytes += nbytes;
 
 			for (uint64_t k = 0; k < nblocks / (iter->nlb + 1); k++) {
-				device->gpu_io->offsets[n_io] = k * (iter->nlb + 1);
-				device->gpu_io->slbas[n_io] =
-				    cur_slba + device->gpu_io->offsets[n_io];
-				device->gpu_io->buffers[n_io] = device->buffers[j];
+				iter->gpu_io->offsets[n_io] = k * (iter->nlb + 1);
+				iter->gpu_io->slbas[n_io] = cur_slba + iter->gpu_io->offsets[n_io];
+				iter->gpu_io->buffers[n_io] = device->buffers[j];
+				iter->gpu_io->devs[n_io] = device->dev;
 				n_io++;
 			}
 		}
-		iter->stats->io += n_io;
-		device->gpu_io->n_io = n_io;
-		clock_gettime(CLOCK_MONOTONIC_RAW, &end);
-		iter->stats->prep_time += (double)(end.tv_sec - start.tv_sec) +
-					  (double)(end.tv_nsec - start.tv_nsec) / 1000000000.f;
-
-		err =
-		    xnvme_gpu_io_submit(GPU_GSIZE/iter->n_devs, GPU_TBSIZE/iter->n_devs, device->dev, XNVME_SPEC_NVM_OPC_READ,
-					iter->nlb, iter->nbytes, device->gpu_io);
-		if (err) {
-			fprintf(stderr, "Could not launch kernel: %d\n", err);
-			return err;
-		}
 	}
+	clock_gettime(CLOCK_MONOTONIC_RAW, &end);
+	iter->stats->prep_time += (double)(end.tv_sec - start.tv_sec) +
+				  (double)(end.tv_nsec - start.tv_nsec) / 1000000000.f;
+	iter->stats->io += n_io;
+	iter->gpu_io->n_io = n_io;
+
 	clock_gettime(CLOCK_MONOTONIC_RAW, &start);
+	err = xnvme_gpu_io_submit((n_io + GPU_TBSIZE - 1) / GPU_TBSIZE, GPU_TBSIZE,
+				  XNVME_SPEC_NVM_OPC_READ, iter->nlb, iter->nbytes, iter->gpu_io);
+	if (err) {
+		fprintf(stderr, "Could not launch kernel: %d\n", err);
+		return err;
+	}
+
 	err = xnvme_gpu_sync();
 	if (err) {
 		fprintf(stderr, "Error synchronizing kernels: %d\n", err);
@@ -540,9 +539,7 @@ sil_term(struct sil_iter *iter)
 		}
 		xal_close(device->xal);
 		xnvme_dev_close(device->dev);
-		if (iter->gpu) {
-			xnvme_gpu_io_free(device->gpu_io);
-		} else {
+		if (!iter->gpu) {
 			free(device->cpu_io);
 			free(device->cpu_io->slbas);
 			free(device->cpu_io->elbas);
@@ -551,6 +548,9 @@ sil_term(struct sil_iter *iter)
 		free(device);
 	}
 
+	if (iter->gpu) {
+		xnvme_gpu_io_free(iter->gpu_io);
+	}
 	free(iter->data->entries);
 	free(iter->data);
 	free(iter->buffers);
