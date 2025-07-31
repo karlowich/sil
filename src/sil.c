@@ -43,6 +43,7 @@ struct sil_dev {
 	struct sil_cpu_io *cpu_io;
 	const char *root_dir;
 	void **buffers;
+	uint64_t buf;
 	uint32_t n_buffers;
 };
 
@@ -314,6 +315,7 @@ _alloc(struct sil_iter *iter)
 	for (uint32_t i = 0; i < iter->n_devs; i++) {
 		struct sil_dev *device = iter->devs[i];
 		device->n_buffers = iter->batch_size / iter->n_devs;
+		device->buf = 0;
 		device->buffers = malloc(sizeof(void *) * device->n_buffers);
 		if (!device->buffers) {
 			err = errno;
@@ -451,48 +453,43 @@ sil_gpu_submit(struct sil_iter *iter)
 	struct timespec start, end;
 	int err;
 
-	for (uint32_t i = 0; i < iter->n_devs; i++) {
-		clock_gettime(CLOCK_MONOTONIC_RAW, &start);
-		struct sil_dev *device = iter->devs[i];
+	clock_gettime(CLOCK_MONOTONIC_RAW, &start);
+	for (uint32_t i = 0; i < iter->batch_size; i++) {
+		struct sil_dev *device = iter->devs[i % iter->n_devs];
 		blocksize = xnvme_dev_get_geo(device->dev)->lba_nbytes;
+		entry = iter->data->entries[iter->data->index++ % iter->data->n_entries];
 
-		for (uint32_t j = 0; j < device->n_buffers; j++) {
-			entry = iter->data->entries[iter->data->index++ % iter->data->n_entries];
+		dir = device->root_inode->content.dentries.inodes[entry.dir];
+		file = dir.content.dentries.inodes[entry.file];
+		extent = file.content.extents.extent[0];
 
-			dir = device->root_inode->content.dentries.inodes[entry.dir];
-			file = dir.content.dentries.inodes[entry.file];
-			extent = file.content.extents.extent[0];
+		cur_slba = xal_fsbno_offset(device->xal, extent.start_block) / blocksize;
+		nbytes = extent.nblocks * device->xal->sb.blocksize;
+		nblocks = nbytes / blocksize;
 
-			cur_slba = xal_fsbno_offset(device->xal, extent.start_block) / blocksize;
-			nbytes = extent.nblocks * device->xal->sb.blocksize;
+		for (uint32_t k = 1; k < file.content.extents.count; k++) {
+			next_extent = file.content.extents.extent[k];
+			next_slba =
+			    xal_fsbno_offset(device->xal, next_extent.start_block) / blocksize;
+			if (next_slba != cur_slba + nblocks) {
+				fprintf(stderr,
+					"File: %s, in dir: %s, has non contiguous extents\n",
+					file.name, dir.name);
+				fprintf(stderr, "extent[%d].elba: %lu, extent[%d].slba: %lu\n",
+					k - 1, cur_slba + nblocks - 1, k, next_slba);
+				return ENOTSUP;
+			}
+			nbytes += next_extent.nblocks * device->xal->sb.blocksize;
 			nblocks = nbytes / blocksize;
+		}
+		iter->stats->bytes += nbytes;
 
-			for (uint32_t k = 1; k < file.content.extents.count; k++) {
-				next_extent = file.content.extents.extent[k];
-				next_slba = xal_fsbno_offset(device->xal, next_extent.start_block) /
-					    blocksize;
-				if (next_slba != cur_slba + nblocks) {
-					fprintf(
-					    stderr,
-					    "File: %s, in dir: %s, has non contiguous extents\n",
-					    file.name, dir.name);
-					fprintf(stderr,
-						"extent[%d].elba: %lu, extent[%d].slba: %lu\n",
-						k - 1, cur_slba + nblocks - 1, k, next_slba);
-					return ENOTSUP;
-				}
-				nbytes += next_extent.nblocks * device->xal->sb.blocksize;
-				nblocks = nbytes / blocksize;
-			}
-			iter->stats->bytes += nbytes;
-
-			for (uint64_t k = 0; k < nblocks / (iter->nlb + 1); k++) {
-				iter->gpu_io->offsets[n_io] = k * (iter->nlb + 1);
-				iter->gpu_io->slbas[n_io] = cur_slba + iter->gpu_io->offsets[n_io];
-				iter->gpu_io->buffers[n_io] = device->buffers[j];
-				iter->gpu_io->devs[n_io] = device->dev;
-				n_io++;
-			}
+		for (uint64_t k = 0; k < nblocks / (iter->nlb + 1); k++) {
+			iter->gpu_io->offsets[n_io] = k * (iter->nlb + 1);
+			iter->gpu_io->slbas[n_io] = cur_slba + iter->gpu_io->offsets[n_io];
+			iter->gpu_io->buffers[n_io] = device->buffers[device->buf++ % device->n_buffers];
+			iter->gpu_io->devs[n_io] = device->dev;
+			n_io++;
 		}
 	}
 	clock_gettime(CLOCK_MONOTONIC_RAW, &end);
