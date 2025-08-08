@@ -448,48 +448,37 @@ sil_gpu_submit(struct sil_iter *iter)
 	struct sil_entry entry;
 	struct xal_inode dir;
 	struct xal_inode file;
-	struct xal_extent extent, next_extent;
-	uint64_t nblocks, nbytes, blocksize, cur_slba, next_slba, n_io = 0;
+	struct xal_extent extent;
+	uint64_t nblocks, nbytes, blocksize, slba, offset, n_io = 0;
+	void *buffer;
 	struct timespec start, end;
 	int err;
 
 	clock_gettime(CLOCK_MONOTONIC_RAW, &start);
 	for (uint32_t i = 0; i < iter->batch_size; i++) {
 		struct sil_dev *device = iter->devs[i % iter->n_devs];
+		buffer = device->buffers[device->buf++ % device->n_buffers];
 		blocksize = xnvme_dev_get_geo(device->dev)->lba_nbytes;
-		entry = iter->data->entries[iter->data->index++ % iter->data->n_entries];
+		offset = 0;
 
+		entry = iter->data->entries[iter->data->index++ % iter->data->n_entries];
 		dir = device->root_inode->content.dentries.inodes[entry.dir];
 		file = dir.content.dentries.inodes[entry.file];
-		extent = file.content.extents.extent[0];
 
-		cur_slba = xal_fsbno_offset(device->xal, extent.start_block) / blocksize;
-		nbytes = extent.nblocks * device->xal->sb.blocksize;
-		nblocks = nbytes / blocksize;
-
-		for (uint32_t k = 1; k < file.content.extents.count; k++) {
-			next_extent = file.content.extents.extent[k];
-			next_slba =
-			    xal_fsbno_offset(device->xal, next_extent.start_block) / blocksize;
-			if (next_slba != cur_slba + nblocks) {
-				fprintf(stderr,
-					"File: %s, in dir: %s, has non contiguous extents\n",
-					file.name, dir.name);
-				fprintf(stderr, "extent[%d].elba: %lu, extent[%d].slba: %lu\n",
-					k - 1, cur_slba + nblocks - 1, k, next_slba);
-				return ENOTSUP;
-			}
-			nbytes += next_extent.nblocks * device->xal->sb.blocksize;
+		for (uint32_t j = 0; j < file.content.extents.count; j++) {
+			extent = file.content.extents.extent[j];
+			slba = xal_fsbno_offset(device->xal, extent.start_block) / blocksize;
+			nbytes = extent.nblocks * device->xal->sb.blocksize;
 			nblocks = nbytes / blocksize;
-		}
-		iter->stats->bytes += nbytes;
-
-		for (uint64_t k = 0; k < nblocks / (iter->nlb + 1); k++) {
-			iter->gpu_io->offsets[n_io] = k * (iter->nlb + 1);
-			iter->gpu_io->slbas[n_io] = cur_slba + iter->gpu_io->offsets[n_io];
-			iter->gpu_io->buffers[n_io] = device->buffers[device->buf++ % device->n_buffers];
-			iter->gpu_io->devs[n_io] = device->dev;
-			n_io++;
+			iter->stats->bytes += nbytes;
+			for (uint64_t k = 0; k < nblocks / (iter->nlb + 1); k++) {
+				iter->gpu_io->offsets[n_io] = offset * (iter->nlb + 1);
+				iter->gpu_io->slbas[n_io] = slba + k * (iter->nlb + 1);
+				iter->gpu_io->buffers[n_io] = buffer;
+				iter->gpu_io->devs[n_io] = device->dev;
+				n_io++;
+				offset++;
+			}
 		}
 	}
 	clock_gettime(CLOCK_MONOTONIC_RAW, &end);
