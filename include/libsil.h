@@ -84,7 +84,7 @@ sil_get_stats(struct sil_iter *iter);
  * @returns 0 on sucess, otherwise `errno`
  */
 int
-sil_init(struct sil_iter **iter, const char **dev_uris, uint32_t n_devs, struct sil_opts *opts);
+sil_init(struct sil_iter **iter, char **dev_uris, uint32_t n_devs, struct sil_opts *opts);
 
 /**
  * Get the next batch from the SIL iterator

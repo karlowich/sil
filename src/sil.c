@@ -565,7 +565,7 @@ _init_stats(struct sil_stats **stats)
 }
 
 int
-sil_init(struct sil_iter **iter, const char **dev_uris, uint32_t n_devs, struct sil_opts *opts)
+sil_init(struct sil_iter **iter, char **dev_uris, uint32_t n_devs, struct sil_opts *opts)
 {
 	struct sil_iter *_iter;
 	int err;
