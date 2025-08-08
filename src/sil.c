@@ -253,6 +253,8 @@ _create_entries(struct sil_iter *iter)
 		fprintf(stderr, "Could not allocate data: %d\n", err);
 		return err;
 	}
+	memset(data, 0, sizeof(struct sil_data));
+
 	for (uint32_t i = 0; i < root_dentries.count; i++) {
 		n_entries += root_dentries.inodes[i].content.dentries.count;
 	}
@@ -276,7 +278,6 @@ _create_entries(struct sil_iter *iter)
 	iter->data = data;
 	iter->data->entries = entries;
 	iter->data->n_entries = n_entries;
-	iter->data->index = 0;
 
 	return 0;
 }
@@ -553,13 +554,7 @@ _init_stats(struct sil_stats **stats)
 		fprintf(stderr, "Could not allocate stats: %d\n", err);
 		return err;
 	}
-	_stats->bytes = 0;
-	_stats->io = 0;
-	_stats->io_time = 0;
-	_stats->prep_time = 0;
-	_stats->n_files = 0;
-	_stats->max_file_size = 0;
-	_stats->avg_file_size = 0;
+	memset(_stats, 0, sizeof(struct sil_stats));
 	*stats = _stats;
 	return 0;
 }
@@ -581,12 +576,11 @@ sil_init(struct sil_iter **iter, char **dev_uris, uint32_t n_devs, struct sil_op
 		fprintf(stderr, "Could not allocate iter: %d\n", err);
 		return err;
 	}
+	memset(_iter, 0, sizeof(struct sil_iter));
 
 	_iter->batch_size = opts->batch_size;
 	_iter->nlb = opts->nlb;
 	_iter->nbytes = opts->nbytes;
-	_iter->n_devs = 0;
-	_iter->buffer_size = 0;
 
 	_iter->devs = malloc(sizeof(struct sil_dev *) * n_devs);
 	if (!_iter->devs) {
@@ -610,6 +604,7 @@ sil_init(struct sil_iter **iter, char **dev_uris, uint32_t n_devs, struct sil_op
 			sil_term(_iter);
 			return err;
 		}
+		memset(device, 0, sizeof(struct sil_dev));
 
 		err = _xnvme_setup(_iter, device, dev_uris[i], opts->backend, opts->queue_depth);
 		if (err) {
