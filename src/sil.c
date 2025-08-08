@@ -525,20 +525,22 @@ sil_term(struct sil_iter *iter)
 		}
 		xal_close(device->xal);
 		xnvme_dev_close(device->dev);
-		if (!iter->gpu) {
-			free(device->cpu_io);
+		if (device->cpu_io) {
 			free(device->cpu_io->slbas);
 			free(device->cpu_io->elbas);
+			free(device->cpu_io);
 		}
 		free(device->buffers);
 		free(device);
 	}
 
-	if (iter->gpu) {
+	if (iter->gpu_io) {
 		xnvme_gpu_io_free(iter->gpu_io);
 	}
-	free(iter->data->entries);
-	free(iter->data);
+	if (iter->data) {
+		free(iter->data);
+		free(iter->data->entries);
+	}
 	free(iter->buffers);
 	free(iter->stats);
 	free(iter);
