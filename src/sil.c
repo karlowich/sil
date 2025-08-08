@@ -606,18 +606,20 @@ sil_init(struct sil_iter **iter, const char **dev_uris, uint32_t n_devs, struct 
 		struct sil_dev *device = malloc(sizeof(struct sil_dev));
 		if (!device) {
 			err = errno;
-			fprintf(stderr, "Could not allocate device: %d\n", err);
+			fprintf(stderr, "Could not allocate handle for %s: %d\n", dev_uris[i], err);
 			sil_term(_iter);
 			return err;
 		}
 
 		err = _xnvme_setup(_iter, device, dev_uris[i], opts->backend, opts->queue_depth);
 		if (err) {
+			fprintf(stderr, "xNVMe setup failed for %s: %d\n", dev_uris[i], err);
 			sil_term(_iter);
 			return err;
 		}
 		err = _xal_setup(_iter, device, opts->root_dir);
 		if (err) {
+			fprintf(stderr, "XAL setup failed for %s: %d\n", dev_uris[i], err);
 			xnvme_dev_close(device->dev);
 			sil_term(_iter);
 			return err;
