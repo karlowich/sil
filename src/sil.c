@@ -19,6 +19,8 @@
 #define GPU_QD 1024
 #define GPU_TBSIZE 64
 
+enum sil_type { SIL_GPU, SIL_CPU };
+
 struct sil_entry {
 	uint64_t dir;
 	uint64_t file;
@@ -60,7 +62,7 @@ struct sil_iter {
 	uint32_t n_devs;
 	uint64_t nbytes;
 	uint64_t buffer_size;
-	bool gpu;
+	enum sil_type type;
 };
 
 static int
@@ -86,17 +88,21 @@ _xnvme_setup(struct sil_iter *iter, struct sil_dev *device, const char *uri, con
 		opts.be = "linux";
 		opts.async = "io_uring";
 		opts.direct = 0;
+		iter->type = SIL_CPU;
 	} else if (strcmp(backend, "io_uring_direct") == 0) {
 		opts.be = "linux";
 		opts.async = "io_uring";
 		opts.direct = 1;
+		iter->type = SIL_CPU;
 	} else if (strcmp(backend, "spdk") == 0) {
 		opts.be = "spdk";
+		iter->type = SIL_CPU;
 	} else if (strcmp(backend, "libnvm-cpu") == 0) {
 		opts.be = "bam";
+		iter->type = SIL_CPU;
 	} else if (strcmp(backend, "libnvm-gpu") == 0) {
 		opts.be = "bam";
-		iter->gpu = true;
+		iter->type = SIL_GPU;
 	} else {
 		fprintf(stderr, "Invalid backend: %s\n", backend);
 		return EINVAL;
@@ -116,14 +122,14 @@ _xnvme_setup(struct sil_iter *iter, struct sil_dev *device, const char *uri, con
 		return err;
 	}
 
-	if (iter->gpu) {
+	if (iter->type == SIL_GPU) {
 		err = xnvme_gpu_create_queues(dev, GPU_QD, GPU_NQ);
 		if (err) {
 			xnvme_dev_close(dev);
 			fprintf(stderr, "xnvme_gpu_create_queues(): %d\n", err);
 			return err;
 		}
-	} else {
+	} else if (iter->type == SIL_CPU) {
 		err = xnvme_queue_init(dev, queue_depth, 0, &device->queue);
 		if (err) {
 			xnvme_dev_close(dev);
@@ -324,12 +330,15 @@ _alloc(struct sil_iter *iter)
 			return err;
 		}
 		for (uint32_t j = 0; j < device->n_buffers; j++) {
-			if (iter->gpu) {
+			switch (iter->type) {
+			case SIL_GPU:
 				device->buffers[j] =
 				    xnvme_gpu_alloc(device->dev, iter->buffer_size);
-			} else {
+				break;
+			case SIL_CPU:
 				device->buffers[j] =
 				    xnvme_buf_alloc(device->dev, iter->buffer_size);
+				break;
 			}
 			if (!device->buffers[j]) {
 				err = errno;
@@ -339,7 +348,7 @@ _alloc(struct sil_iter *iter)
 			iter->buffers[j + i * device->n_buffers] = device->buffers[j];
 		}
 
-		if (!iter->gpu) {
+		if (iter->type == SIL_CPU) {
 			device->cpu_io = malloc(sizeof(struct sil_cpu_io));
 			if (!device->cpu_io) {
 				err = errno;
@@ -363,7 +372,7 @@ _alloc(struct sil_iter *iter)
 		}
 	}
 
-	if (iter->gpu) {
+	if (iter->type == SIL_GPU) {
 		err = xnvme_gpu_io_alloc(&iter->gpu_io,
 					 (iter->buffer_size / iter->nbytes) * iter->batch_size);
 		if (err) {
@@ -512,16 +521,19 @@ sil_term(struct sil_iter *iter)
 {
 	for (uint32_t i = 0; i < iter->n_devs; i++) {
 		struct sil_dev *device = iter->devs[i];
-		if (iter->gpu) {
+		switch (iter->type) {
+		case SIL_GPU:
 			for (uint32_t j = 0; j < device->n_buffers; j++) {
 				xnvme_gpu_free(device->dev, device->buffers[j]);
 			}
 			xnvme_gpu_delete_queues(device->dev);
-		} else {
+			break;
+		case SIL_CPU:
 			for (uint32_t j = 0; j < device->n_buffers; j++) {
 				xnvme_buf_free(device->dev, device->buffers[j]);
 			}
 			xnvme_queue_term(device->queue);
+			break;
 		}
 		xal_close(device->xal);
 		xnvme_dev_close(device->dev);
@@ -625,10 +637,13 @@ sil_init(struct sil_iter **iter, char **dev_uris, uint32_t n_devs, struct sil_op
 		_iter->n_devs++;
 	}
 
-	if (_iter->gpu) {
+	switch (_iter->type) {
+	case SIL_GPU:
 		_iter->io_fn = sil_gpu_submit;
-	} else {
+		break;
+	case SIL_CPU:
 		_iter->io_fn = sil_cpu_submit;
+		break;
 	}
 
 	err = _alloc(_iter);
