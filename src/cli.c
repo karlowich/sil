@@ -86,7 +86,7 @@ main(int argc, char *argv[])
 	struct sil_cli_args args = {0};
 	struct sil_opts opts = sil_opts_default();
 	struct sil_stats *stats;
-	struct timespec start, end;
+	struct timespec total_start, inter_start, inter_end, total_end;
 	struct sil_iter *iter;
 	void **buffers;
 	char **dev_uris;
@@ -114,7 +114,10 @@ main(int argc, char *argv[])
 		fprintf(stderr, "Initialzing iterator failed, err: %d\n", err);
 		return err;
 	}
-	clock_gettime(CLOCK_MONOTONIC_RAW, &start);
+	stats = sil_get_stats(iter);
+	printf("Time, Batches, IOPS, MiB/s\n");
+	clock_gettime(CLOCK_MONOTONIC_RAW, &total_start);
+	clock_gettime(CLOCK_MONOTONIC_RAW, &inter_start);
 	for (uint32_t i = 0; i < args.batches; i++) {
 		err = sil_next(iter, &buffers);
 		if (err) {
@@ -122,12 +125,24 @@ main(int argc, char *argv[])
 			sil_term(iter);
 			return err;
 		}
-	}
-	clock_gettime(CLOCK_MONOTONIC_RAW, &end);
-	time = (double)(end.tv_sec - start.tv_sec) +
-	       (double)(end.tv_nsec - start.tv_nsec) / 1000000000.f;
+		clock_gettime(CLOCK_MONOTONIC_RAW, &inter_end);
+		time = (double)(inter_end.tv_sec - inter_start.tv_sec) +
+		       (double)(inter_end.tv_nsec - inter_start.tv_nsec) / 1000000000.f;
 
-	stats = sil_get_stats(iter);
+		if (time >= 1.f) {
+			time = (double)(inter_end.tv_sec - total_start.tv_sec) +
+			       (double)(inter_end.tv_nsec - total_start.tv_nsec) / 1000000000.f;
+			printf("%lf, %u, %lf, %lf\n", time, i, stats->io / time,
+			       (stats->bytes / 1024.f / 1024.f) / time);
+			clock_gettime(CLOCK_MONOTONIC_RAW, &inter_start);
+		}
+	}
+	clock_gettime(CLOCK_MONOTONIC_RAW, &total_end);
+	time = (double)(total_end.tv_sec - total_start.tv_sec) +
+	       (double)(total_end.tv_nsec - total_start.tv_nsec) / 1000000000.f;
+	printf("%lf, %u, %lf, %lf\n\n", time, args.batches, stats->io / time,
+	       (stats->bytes / 1024.f / 1024.f) / time);
+
 	printf("IO stats:\n");
 	printf("\tTotal time: %lf\n", time);
 	printf("\tPrep time: %lf\n", stats->prep_time);
