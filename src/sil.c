@@ -53,14 +53,11 @@ struct sil_iter {
 	struct sil_dev **devs;
 	struct sil_data *data;
 	struct sil_stats *stats;
+	struct sil_opts *opts;
 	struct xnvme_gpu_io *gpu_io;
-	const char *root_dir;
 	int (*io_fn)(struct sil_iter *iter);
 	void **buffers;
-	uint32_t batch_size;
-	uint32_t nlb;
 	uint32_t n_devs;
-	uint64_t nbytes;
 	uint64_t buffer_size;
 	enum sil_type type;
 };
@@ -77,9 +74,9 @@ inode_cmp(const void *a, const void *b)
 }
 
 static int
-_xnvme_setup(struct sil_iter *iter, struct sil_dev *device, const char *uri, const char *backend,
-	     uint32_t queue_depth)
+_xnvme_setup(struct sil_iter *iter, struct sil_dev *device, const char *uri)
 {
+	const char *backend = iter->opts->backend;
 	struct xnvme_opts opts = xnvme_opts_default();
 	struct xnvme_dev *dev;
 	int err;
@@ -130,7 +127,7 @@ _xnvme_setup(struct sil_iter *iter, struct sil_dev *device, const char *uri, con
 			return err;
 		}
 	} else if (iter->type == SIL_CPU) {
-		err = xnvme_queue_init(dev, queue_depth, 0, &device->queue);
+		err = xnvme_queue_init(dev, iter->opts->queue_depth, 0, &device->queue);
 		if (err) {
 			xnvme_dev_close(dev);
 			fprintf(stderr, "xnvme_queue_init(): %d\n", err);
@@ -173,7 +170,7 @@ find_root_dir(struct xal *SIL_UNUSED(xal), struct xal_inode *inode, void *cb_arg
 }
 
 static int
-_xal_setup(struct sil_iter *iter, struct sil_dev *device, const char *root_dir)
+_xal_setup(struct sil_iter *iter, struct sil_dev *device)
 {
 	struct xal *xal;
 	int err;
@@ -198,8 +195,8 @@ _xal_setup(struct sil_iter *iter, struct sil_dev *device, const char *root_dir)
 		return err;
 	}
 
-	if (root_dir) {
-		device->root_dir = root_dir;
+	if (iter->opts->root_dir) {
+		device->root_dir = iter->opts->root_dir;
 
 		err = xal_walk(xal, xal->root, find_root_dir, device);
 		switch (err) {
@@ -312,7 +309,7 @@ static int
 _alloc(struct sil_iter *iter)
 {
 	int err;
-	iter->buffers = malloc(sizeof(void *) * iter->batch_size);
+	iter->buffers = malloc(sizeof(void *) * iter->opts->batch_size);
 	if (!iter->buffers) {
 		err = errno;
 		fprintf(stderr, "Could not allocate array of buffers: %d\n", err);
@@ -321,7 +318,7 @@ _alloc(struct sil_iter *iter)
 
 	for (uint32_t i = 0; i < iter->n_devs; i++) {
 		struct sil_dev *device = iter->devs[i];
-		device->n_buffers = iter->batch_size / iter->n_devs;
+		device->n_buffers = iter->opts->batch_size / iter->n_devs;
 		device->buf = 0;
 		device->buffers = malloc(sizeof(void *) * device->n_buffers);
 		if (!device->buffers) {
@@ -373,8 +370,8 @@ _alloc(struct sil_iter *iter)
 	}
 
 	if (iter->type == SIL_GPU) {
-		err = xnvme_gpu_io_alloc(&iter->gpu_io,
-					 (iter->buffer_size / iter->nbytes) * iter->batch_size);
+		err = xnvme_gpu_io_alloc(&iter->gpu_io, (iter->buffer_size / iter->opts->nbytes) *
+							    iter->opts->batch_size);
 		if (err) {
 			fprintf(stderr, "Could not allocate IO struct: %d\n", err);
 			return err;
@@ -430,7 +427,7 @@ sil_cpu_submit(struct sil_iter *iter)
 				nblocks = nbytes / blocksize;
 			}
 			device->cpu_io->elbas[j] = device->cpu_io->slbas[j] + nblocks - 1;
-			iter->stats->io += nblocks / (iter->nlb + 1);
+			iter->stats->io += nblocks / (iter->opts->nlb + 1);
 			iter->stats->bytes += nbytes;
 		}
 		clock_gettime(CLOCK_MONOTONIC_RAW, &end);
@@ -439,8 +436,9 @@ sil_cpu_submit(struct sil_iter *iter)
 
 		clock_gettime(CLOCK_MONOTONIC_RAW, &start);
 		err = xnvme_io_range_submit(device->queue, XNVME_SPEC_NVM_OPC_READ,
-					    device->cpu_io->slbas, device->cpu_io->elbas, iter->nlb,
-					    iter->nbytes, iter->buffers, device->n_buffers);
+					    device->cpu_io->slbas, device->cpu_io->elbas,
+					    iter->opts->nlb, iter->opts->nbytes, iter->buffers,
+					    device->n_buffers);
 		clock_gettime(CLOCK_MONOTONIC_RAW, &end);
 		iter->stats->io_time += (double)(end.tv_sec - start.tv_sec) +
 					(double)(end.tv_nsec - start.tv_nsec) / 1000000000.f;
@@ -465,7 +463,7 @@ sil_gpu_submit(struct sil_iter *iter)
 	int err;
 
 	clock_gettime(CLOCK_MONOTONIC_RAW, &start);
-	for (uint32_t i = 0; i < iter->batch_size; i++) {
+	for (uint32_t i = 0; i < iter->opts->batch_size; i++) {
 		struct sil_dev *device = iter->devs[i % iter->n_devs];
 		buffer = device->buffers[device->buf++ % device->n_buffers];
 		blocksize = xnvme_dev_get_geo(device->dev)->lba_nbytes;
@@ -481,9 +479,9 @@ sil_gpu_submit(struct sil_iter *iter)
 			nbytes = extent.nblocks * device->xal->sb.blocksize;
 			nblocks = nbytes / blocksize;
 			iter->stats->bytes += nbytes;
-			for (uint64_t k = 0; k < nblocks / (iter->nlb + 1); k++) {
-				iter->gpu_io->offsets[n_io] = offset * (iter->nlb + 1);
-				iter->gpu_io->slbas[n_io] = slba + k * (iter->nlb + 1);
+			for (uint64_t k = 0; k < nblocks / (iter->opts->nlb + 1); k++) {
+				iter->gpu_io->offsets[n_io] = offset * (iter->opts->nlb + 1);
+				iter->gpu_io->slbas[n_io] = slba + k * (iter->opts->nlb + 1);
 				iter->gpu_io->buffers[n_io] = buffer;
 				iter->gpu_io->devs[n_io] = device->dev;
 				n_io++;
@@ -499,7 +497,8 @@ sil_gpu_submit(struct sil_iter *iter)
 
 	clock_gettime(CLOCK_MONOTONIC_RAW, &start);
 	err = xnvme_gpu_io_submit((n_io + GPU_TBSIZE - 1) / GPU_TBSIZE, GPU_TBSIZE,
-				  XNVME_SPEC_NVM_OPC_READ, iter->nlb, iter->nbytes, iter->gpu_io);
+				  XNVME_SPEC_NVM_OPC_READ, iter->opts->nlb, iter->opts->nbytes,
+				  iter->gpu_io);
 	if (err) {
 		fprintf(stderr, "Could not launch kernel: %d\n", err);
 		return err;
@@ -592,9 +591,7 @@ sil_init(struct sil_iter **iter, char **dev_uris, uint32_t n_devs, struct sil_op
 	}
 	memset(_iter, 0, sizeof(struct sil_iter));
 
-	_iter->batch_size = opts->batch_size;
-	_iter->nlb = opts->nlb;
-	_iter->nbytes = opts->nbytes;
+	_iter->opts = opts;
 
 	_iter->devs = malloc(sizeof(struct sil_dev *) * n_devs);
 	if (!_iter->devs) {
@@ -620,13 +617,13 @@ sil_init(struct sil_iter **iter, char **dev_uris, uint32_t n_devs, struct sil_op
 		}
 		memset(device, 0, sizeof(struct sil_dev));
 
-		err = _xnvme_setup(_iter, device, dev_uris[i], opts->backend, opts->queue_depth);
+		err = _xnvme_setup(_iter, device, dev_uris[i]);
 		if (err) {
 			fprintf(stderr, "xNVMe setup failed for %s: %d\n", dev_uris[i], err);
 			sil_term(_iter);
 			return err;
 		}
-		err = _xal_setup(_iter, device, opts->root_dir);
+		err = _xal_setup(_iter, device);
 		if (err) {
 			fprintf(stderr, "XAL setup failed for %s: %d\n", dev_uris[i], err);
 			xnvme_dev_close(device->dev);
