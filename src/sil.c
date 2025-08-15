@@ -1,14 +1,22 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #include <errno.h>
+#include <fcntl.h>
+#include <limits.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #include <libsil.h>
 #include <sil_util.h>
 
+#include <cuda_runtime.h>
+#include <cufile.h>
 #include <libxal.h>
 #include <libxnvme.h>
 
@@ -19,7 +27,7 @@
 #define GPU_QD 1024
 #define GPU_TBSIZE 64
 
-enum sil_type { SIL_GPU, SIL_CPU };
+enum sil_type { SIL_GPU, SIL_CPU, SIL_FILE };
 
 struct sil_entry {
 	uint64_t dir;
@@ -37,12 +45,19 @@ struct sil_cpu_io {
 	uint64_t *elbas;
 };
 
+struct sil_file_io {
+	char prefix[PATH_MAX];
+	char path[PATH_MAX];
+	void *buffer;
+};
+
 struct sil_dev {
 	struct xnvme_dev *dev;
 	struct xnvme_queue *queue;
 	struct xal *xal;
 	struct xal_inode *root_inode;
 	struct sil_cpu_io *cpu_io;
+	struct sil_file_io *file_io;
 	const char *root_dir;
 	void **buffers;
 	uint64_t buf;
@@ -100,6 +115,12 @@ _xnvme_setup(struct sil_iter *iter, struct sil_dev *device, const char *uri)
 	} else if (strcmp(backend, "libnvm-gpu") == 0) {
 		opts.be = "bam";
 		iter->type = SIL_GPU;
+	} else if (strcmp(backend, "posix") == 0) {
+		opts.be = "linux";
+		iter->type = SIL_FILE;
+	} else if (strcmp(backend, "gds") == 0) {
+		opts.be = "linux";
+		iter->type = SIL_FILE;
 	} else {
 		fprintf(stderr, "Invalid backend: %s\n", backend);
 		return EINVAL;
@@ -167,6 +188,30 @@ find_root_dir(struct xal *SIL_UNUSED(xal), struct xal_inode *inode, void *cb_arg
 	}
 
 	return 0; // continue
+}
+
+static void
+path_prepend(char *path, struct xal_inode *node)
+{
+	if (node->name[0] == '\0') {
+		return;
+	}
+	path_prepend(path, node->parent);
+	strcat(path, "/");
+	strcat(path, node->name);
+}
+
+static void
+_find_prefix(struct sil_iter *iter)
+{
+	char *prefix;
+	struct sil_dev *device;
+	for (uint32_t i = 0; i < iter->n_devs; i++) {
+		device = iter->devs[i];
+		prefix = device->file_io->prefix;
+		strcpy(prefix, iter->opts->mnt);
+		path_prepend(prefix, device->root_inode);
+	}
 }
 
 static int
@@ -336,6 +381,9 @@ _alloc(struct sil_iter *iter)
 				device->buffers[j] =
 				    xnvme_buf_alloc(device->dev, iter->buffer_size);
 				break;
+			case SIL_FILE:
+				err = cudaMalloc(&device->buffers[j], iter->buffer_size);
+				break;
 			}
 			if (!device->buffers[j]) {
 				err = errno;
@@ -364,6 +412,19 @@ _alloc(struct sil_iter *iter)
 			if (!device->cpu_io->elbas) {
 				err = errno;
 				fprintf(stderr, "Could not allocate array for elbas: %d\n", err);
+				return err;
+			}
+		} else if (iter->type == SIL_FILE) {
+			device->file_io = malloc(sizeof(struct sil_file_io));
+			if (!device->file_io) {
+				err = errno;
+				fprintf(stderr, "Could not allocate IO struct: %d\n", err);
+				return err;
+			}
+			device->file_io->buffer = malloc(iter->buffer_size);
+			if (!device->file_io->buffer) {
+				err = errno;
+				fprintf(stderr, "Could not allocate bounce buffer: %d\n", err);
 				return err;
 			}
 		}
@@ -443,7 +504,7 @@ sil_cpu_submit(struct sil_iter *iter)
 		iter->stats->io_time += (double)(end.tv_sec - start.tv_sec) +
 					(double)(end.tv_nsec - start.tv_nsec) / 1000000000.f;
 		if (err) {
-			fprintf(stderr, "IO failed: %d", err);
+			fprintf(stderr, "IO failed: %d\n", err);
 			return err;
 		}
 	}
@@ -515,6 +576,106 @@ sil_gpu_submit(struct sil_iter *iter)
 	return 0;
 }
 
+int
+sil_file_submit(struct sil_iter *iter)
+{
+	struct sil_entry entry;
+	struct xal_inode dir;
+	struct xal_inode file;
+	struct timespec start, end;
+	CUfileError_t status;
+	CUfileDescr_t descr;
+	CUfileHandle_t fh;
+	uint64_t nbytes;
+	void *buffer, *bounce;
+	char *prefix, *path;
+	int err, fd, flags;
+	bool is_gds;
+
+	for (uint32_t i = 0; i < iter->opts->batch_size; i++) {
+		clock_gettime(CLOCK_MONOTONIC_RAW, &start);
+		struct sil_dev *device = iter->devs[i % iter->n_devs];
+		prefix = device->file_io->prefix;
+		path = device->file_io->path;
+		buffer = device->buffers[device->buf++ % device->n_buffers];
+		bounce = device->file_io->buffer;
+
+		entry = iter->data->entries[iter->data->index++ % iter->data->n_entries];
+		dir = device->root_inode->content.dentries.inodes[entry.dir];
+		file = dir.content.dentries.inodes[entry.file];
+
+		nbytes = (1 + ((file.size - 1) / device->xal->sb.blocksize)) *
+			 (device->xal->sb.blocksize);
+		iter->stats->bytes += nbytes;
+		iter->stats->io += nbytes / iter->opts->nbytes;
+
+		memcpy(path, prefix, strlen(prefix) + 1);
+		strcat(path, "/");
+		strcat(path, dir.name);
+		strcat(path, "/");
+		strcat(path, file.name);
+
+		is_gds = strcmp(iter->opts->backend, "gds") == 0;
+
+		flags = O_RDONLY;
+		if (is_gds) {
+			flags = flags | O_DIRECT;
+		}
+
+		fd = open(path, flags);
+		if (fd == -1) {
+			err = errno;
+			fprintf(stderr, "Could not open %s, err: %d\n", path, err);
+			return err;
+		}
+
+		if (is_gds) {
+			memset(&descr, 0, sizeof(CUfileDescr_t));
+			descr.handle.fd = fd;
+			descr.type = CU_FILE_HANDLE_TYPE_OPAQUE_FD;
+			status = cuFileHandleRegister(&fh, &descr);
+			if (status.err != CU_FILE_SUCCESS) {
+				fprintf(stderr, "Could not register file, err: %d\n", status.err);
+				close(fd);
+				return status.err;
+			}
+		}
+
+		clock_gettime(CLOCK_MONOTONIC_RAW, &end);
+		iter->stats->prep_time += (double)(end.tv_sec - start.tv_sec) +
+					  (double)(end.tv_nsec - start.tv_nsec) / 1000000000.f;
+
+		clock_gettime(CLOCK_MONOTONIC_RAW, &start);
+		if (is_gds) {
+			err = cuFileRead(fh, buffer, nbytes, 0, 0);
+			if (err < 0) {
+				fprintf(stderr, "Could not read %s, err: %d\n", path, err);
+				return err;
+			}
+			cuFileHandleDeregister(fh);
+		} else {
+			err = read(fd, bounce, nbytes);
+			if (err == -1) {
+				err = errno;
+				fprintf(stderr, "Could not read %s, err: %d\n", path, err);
+				return err;
+			}
+
+			err = cudaMemcpy(buffer, bounce, nbytes, cudaMemcpyHostToDevice);
+			if (err) {
+				fprintf(stderr, "Could not copy data to GPU memory, err: %d\n",
+					err);
+				return err;
+			}
+		}
+		clock_gettime(CLOCK_MONOTONIC_RAW, &end);
+		iter->stats->io_time += (double)(end.tv_sec - start.tv_sec) +
+					(double)(end.tv_nsec - start.tv_nsec) / 1000000000.f;
+		close(fd);
+	}
+	return 0;
+}
+
 void
 sil_term(struct sil_iter *iter)
 {
@@ -533,6 +694,11 @@ sil_term(struct sil_iter *iter)
 			}
 			xnvme_queue_term(device->queue);
 			break;
+		case SIL_FILE:
+			for (uint32_t j = 0; j < device->n_buffers; j++) {
+				cudaFree(device->buffers[j]);
+			}
+			break;
 		}
 		xal_close(device->xal);
 		xnvme_dev_close(device->dev);
@@ -540,6 +706,9 @@ sil_term(struct sil_iter *iter)
 			free(device->cpu_io->slbas);
 			free(device->cpu_io->elbas);
 			free(device->cpu_io);
+		} else if (device->file_io) {
+			free(device->file_io->buffer);
+			free(device->file_io);
 		}
 		free(device->buffers);
 		free(device);
@@ -549,8 +718,8 @@ sil_term(struct sil_iter *iter)
 		xnvme_gpu_io_free(iter->gpu_io);
 	}
 	if (iter->data) {
-		free(iter->data);
 		free(iter->data->entries);
+		free(iter->data);
 	}
 	free(iter->buffers);
 	free(iter->stats);
@@ -641,12 +810,19 @@ sil_init(struct sil_iter **iter, char **dev_uris, uint32_t n_devs, struct sil_op
 	case SIL_CPU:
 		_iter->io_fn = sil_cpu_submit;
 		break;
+	case SIL_FILE:
+		_iter->io_fn = sil_file_submit;
+		break;
 	}
 
 	err = _alloc(_iter);
 	if (err) {
 		sil_term(_iter);
 		return err;
+	}
+
+	if (_iter->type == SIL_FILE) {
+		_find_prefix(_iter);
 	}
 
 	// Create an entry for every file in every directory
@@ -690,7 +866,8 @@ struct sil_opts
 sil_opts_default()
 {
 	struct sil_opts opts = {.root_dir = NULL,
-				.backend = "io_uring",
+				.mnt = "/mnt",
+				.backend = "libnvm-gpu",
 				.nlb = 7,
 				.nbytes = 4096,
 				.queue_depth = 64,

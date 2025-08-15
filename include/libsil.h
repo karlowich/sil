@@ -28,6 +28,7 @@ struct sil_iter;
  */
 struct sil_opts {
 	char *root_dir;	      ///< A directory containing subdirectories with files
+	char *mnt;	      ///< The mointpoint of the drive
 	char *backend;	      ///< The backend to use ("io_uring" or "spdk")
 	uint64_t nbytes;      ///< The number of bytes per I/O
 	uint32_t nlb;	      ///< The number of blocks per I/O (zero-indexed)

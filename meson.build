@@ -18,6 +18,8 @@ if not cc.has_function('clock_gettime', prefix: '#include <time.h>', dependencie
   error('clock_gettime not found')
 endif
 
+cuda_dep = dependency('cuda', modules: ['cufile'])
+
 xnvme_dep = dependency(
   'xnvme',
   version: '0.7.5',
@@ -32,6 +34,7 @@ xal_dep = dependency(
 
 sil_deps = [
   rt_dep,
+  cuda_dep,
   xnvme_dep,
   xal_dep,
 ]
