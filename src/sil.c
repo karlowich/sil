@@ -21,7 +21,7 @@
 #include <libxnvme.h>
 
 // Arbitrary value out of range of normal err
-#define ROOT_DIR_FOUND 9000
+#define DATA_DIR_FOUND 9000
 
 #define GPU_NQ 128
 #define GPU_QD 1024
@@ -58,7 +58,7 @@ struct sil_dev {
 	struct xal_inode *root_inode;
 	struct sil_cpu_io *cpu_io;
 	struct sil_file_io *file_io;
-	const char *root_dir;
+	const char *data_dir;
 	void **buffers;
 	uint64_t buf;
 	uint32_t n_buffers;
@@ -177,14 +177,14 @@ find_buffer_size(struct xal *SIL_UNUSED(xal), struct xal_inode *inode, void *cb_
 }
 
 static int
-find_root_dir(struct xal *SIL_UNUSED(xal), struct xal_inode *inode, void *cb_args,
+find_data_dir(struct xal *SIL_UNUSED(xal), struct xal_inode *inode, void *cb_args,
 	      int SIL_UNUSED(level))
 {
 	struct sil_dev *dev = (struct sil_dev *)cb_args;
 
-	if (strcmp(dev->root_dir, inode->name) == 0) {
+	if (strcmp(dev->data_dir, inode->name) == 0) {
 		dev->root_inode = inode;
-		return ROOT_DIR_FOUND; // break
+		return DATA_DIR_FOUND; // break
 	}
 
 	return 0; // continue
@@ -240,21 +240,21 @@ _xal_setup(struct sil_iter *iter, struct sil_dev *device)
 		return err;
 	}
 
-	if (iter->opts->root_dir) {
-		device->root_dir = iter->opts->root_dir;
+	if (iter->opts->data_dir) {
+		device->data_dir = iter->opts->data_dir;
 
-		err = xal_walk(xal, xal->root, find_root_dir, device);
+		err = xal_walk(xal, xal->root, find_data_dir, device);
 		switch (err) {
-		case ROOT_DIR_FOUND:
+		case DATA_DIR_FOUND:
 			break;
 
 		case 0: // Root dir not found
-			fprintf(stderr, "Couldn't find root directory: %s\n", device->root_dir);
+			fprintf(stderr, "Couldn't find root directory: %s\n", device->data_dir);
 			xal_close(xal);
 			return ENOENT;
 
 		default:
-			fprintf(stderr, "xal_walk(find_root_dir): %d\n", err);
+			fprintf(stderr, "xal_walk(find_data_dir): %d\n", err);
 			xal_close(xal);
 			return err;
 		}
@@ -865,7 +865,7 @@ sil_next(struct sil_iter *iter, void ***buffers)
 struct sil_opts
 sil_opts_default()
 {
-	struct sil_opts opts = {.root_dir = NULL,
+	struct sil_opts opts = {.data_dir = NULL,
 				.mnt = "/mnt",
 				.backend = "libnvm-gpu",
 				.nlb = 7,

@@ -17,12 +17,13 @@ print_help(const char *name)
 {
 	fprintf(stderr, "Usage: %s <comma-separated device uris> [<args>] \n", name);
 	fprintf(stderr, "Where <args> include \n");
-	fprintf(stderr, "\t --root-dir \t | \t A directory containing subdirectories with files\n");
-	fprintf(stderr, "\t \t \t | \t The root dir should be a name of a directory, not a path\n");
-	fprintf(stderr, "\t \t \t | \t The name of the root dir should be unique\n");
+	fprintf(stderr, "\t --data-dir \t | \t A directory containing subdirectories with files\n");
+	fprintf(stderr, "\t \t \t | \t The data-dir should be a name of a directory, not a path\n");
+	fprintf(stderr, "\t \t \t | \t The name of the data-dir should be unique\n");
 	fprintf(stderr, "\t --backend \t | \t The backend to use for reading files (libnvm-gpu "
 			"[default], posix or gds)\n");
-	fprintf(stderr, "\t --mnt \t | \t The mountpoint of the drive (default = /mnt). Only relevant for backends: 'posix' and 'gds'\n");
+	fprintf(stderr, "\t --mnt \t \t | \t The mountpoint of the drive (default = /mnt). Only "
+			"relevant for backends: 'posix' and 'gds'\n");
 	fprintf(stderr,
 		"\t --batch-size \t | \t The number of files to read per batch (default = 1)\n");
 	fprintf(stderr, "\t --batches \t | \t The number of batches to read (default = 1)\n");
@@ -38,8 +39,8 @@ parse_args(int argc, char *argv[], struct sil_cli_args *args, struct sil_opts *o
 	}
 
 	for (int i = 1; i < argc; i++) {
-		if (strcmp(argv[i], "--root-dir") == 0) {
-			opts->root_dir = argv[++i];
+		if (strcmp(argv[i], "--root-dir") == 0 || strcmp(argv[i], "--data-dir") == 0) {
+			opts->data_dir = argv[++i];
 		} else if (strcmp(argv[i], "--mnt") == 0) {
 			opts->mnt = argv[++i];
 		} else if (strcmp(argv[i], "--backend") == 0) {

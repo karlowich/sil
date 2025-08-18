@@ -4,12 +4,12 @@
  * without mounting the file system.
  *
  * The library works with the following directory structure:
- * <root_dir>/a/file0
- * <root_dir>/a/file1
- * <root_dir>/b/file2
- * <root_dir>/b/file3
- * <root_dir>/c/file4
- * <root_dir>/c/file5
+ * <data_dir>/a/file0
+ * <data_dir>/a/file1
+ * <data_dir>/b/file2
+ * <data_dir>/b/file3
+ * <data_dir>/c/file4
+ * <data_dir>/c/file5
  * ...
  *
  */
@@ -27,7 +27,7 @@ struct sil_iter;
  * Additionally, the name of the root directory should be unique
  */
 struct sil_opts {
-	char *root_dir;	      ///< A directory containing subdirectories with files
+	char *data_dir;	      ///< A directory containing subdirectories with files
 	char *mnt;	      ///< The mointpoint of the drive
 	char *backend;	      ///< The backend to use ("io_uring" or "spdk")
 	uint64_t nbytes;      ///< The number of bytes per I/O
@@ -52,7 +52,7 @@ struct sil_stats {
 /**
  * Get default options
  *
- * root_dir = NULL
+ * data_dir = NULL
  * backend = "io_uring"
  * nlb = 7
  * nbytes = 4096
