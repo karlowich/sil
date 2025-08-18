@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -10,6 +11,7 @@ struct sil_cli_args {
 	char *dev_uris;
 	uint32_t batches;
 	uint32_t n_devs;
+	bool summary;
 };
 
 void
@@ -27,6 +29,7 @@ print_help(const char *name)
 	fprintf(stderr,
 		"\t --batch-size \t | \t The number of files to read per batch (default = 1)\n");
 	fprintf(stderr, "\t --batches \t | \t The number of batches to read (default = 1)\n");
+	fprintf(stderr, "\t --summary \t | \t Print IO and dataset stats\n");
 	fprintf(stderr, "\t --help \t | \t Print this message\n");
 }
 
@@ -57,6 +60,8 @@ parse_args(int argc, char *argv[], struct sil_cli_args *args, struct sil_opts *o
 				fprintf(stderr, "Invalid number of batches: %s\n", argv[i]);
 				return -EINVAL;
 			}
+		} else if (strcmp(argv[i], "--summary") == 0) {
+			args->summary = true;
 		} else if (strcmp(argv[i], "--help") == 0) {
 			print_help(argv[0]);
 			exit(0);
@@ -144,22 +149,25 @@ main(int argc, char *argv[])
 	clock_gettime(CLOCK_MONOTONIC_RAW, &total_end);
 	time = (double)(total_end.tv_sec - total_start.tv_sec) +
 	       (double)(total_end.tv_nsec - total_start.tv_nsec) / 1000000000.f;
-	printf("%lf, %u, %lf, %lf\n\n", time, args.batches, stats->io / time,
+	printf("%lf, %u, %lf, %lf\n", time, args.batches, stats->io / time,
 	       (stats->bytes / 1024.f / 1024.f) / time);
 
-	printf("IO stats:\n");
-	printf("\tTotal time: %lf\n", time);
-	printf("\tPrep time: %lf\n", stats->prep_time);
-	printf("\tIO time: %lf\n", stats->io_time);
-	printf("\tFile/s: %lf\n", (args.batches * opts.batch_size) / time);
-	printf("\tMiB/s: %lf\n", (stats->bytes / 1024.f / 1024.f) / time);
-	printf("\tIOPS: %lf\n", stats->io / time);
-	printf("\tNumber of IOs: %lu\n", stats->io);
-	printf("Dataset stats:\n");
-	printf("\tNumber of files in the dataset: %lu\n", stats->n_files);
-	printf("\tMaximum size of files in the dataset (KiB): %lu\n", stats->max_file_size / 1024);
-	printf("\tAverage size of files in the dataset (KiB): %lf\n", stats->avg_file_size / 1024);
-
+	if (args.summary) {
+		printf("\nIO stats:\n");
+		printf("\tTotal time: %lf\n", time);
+		printf("\tPrep time: %lf\n", stats->prep_time);
+		printf("\tIO time: %lf\n", stats->io_time);
+		printf("\tFile/s: %lf\n", (args.batches * opts.batch_size) / time);
+		printf("\tMiB/s: %lf\n", (stats->bytes / 1024.f / 1024.f) / time);
+		printf("\tIOPS: %lf\n", stats->io / time);
+		printf("\tNumber of IOs: %lu\n", stats->io);
+		printf("Dataset stats:\n");
+		printf("\tNumber of files in the dataset: %lu\n", stats->n_files);
+		printf("\tMaximum size of files in the dataset (KiB): %lu\n",
+		       stats->max_file_size / 1024);
+		printf("\tAverage size of files in the dataset (KiB): %lf\n",
+		       stats->avg_file_size / 1024);
+	}
 	sil_term(iter);
 
 	return 0;
