@@ -44,7 +44,8 @@ public_headers = files(
 )
 
 sources = files(
-  'src/sil.c',
+  'src/iter.c',
+  'src/io.c',
 )
 
 include_dirs = include_directories('include')

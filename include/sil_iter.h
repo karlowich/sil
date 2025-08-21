@@ -1,0 +1,37 @@
+#ifndef __SIL_ITER_H
+#define __SIL_ITER_H
+
+#include <stdint.h>
+#include <libsil.h>
+#include <sil_io.h>
+
+enum sil_type { SIL_GPU, SIL_CPU, SIL_FILE };
+
+
+struct sil_dev {
+	struct xnvme_dev *dev;
+	struct xnvme_queue *queue;
+	struct xal *xal;
+	struct xal_inode *root_inode;
+	struct sil_cpu_io *cpu_io;
+	struct sil_file_io *file_io;
+	const char *data_dir;
+	void **buffers;
+	uint64_t buf;
+	uint32_t n_buffers;
+};
+
+struct sil_iter {
+	struct sil_dev **devs;
+	struct sil_data *data;
+	struct sil_stats *stats;
+	struct sil_opts *opts;
+	struct xnvme_gpu_io *gpu_io;
+	int (*io_fn)(struct sil_iter *iter);
+	void **buffers;
+	uint32_t n_devs;
+	uint64_t buffer_size;
+	enum sil_type type;
+};
+
+#endif

@@ -13,6 +13,8 @@
  * ...
  *
  */
+#ifndef __LIBSIL_H
+#define __LIBSIL_H
 #include <stdint.h>
 
 /**
@@ -106,3 +108,5 @@ sil_next(struct sil_iter *iter, void ***buffers);
  */
 void
 sil_term(struct sil_iter *iter);
+
+#endif
