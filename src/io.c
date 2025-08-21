@@ -20,6 +20,7 @@
 #include <cufile.h>
 
 #define GPU_TBSIZE 64
+#define GPU_WARPSIZE 32
 
 int
 sil_cpu_submit(struct sil_iter *iter)
@@ -138,6 +139,53 @@ sil_gpu_submit(struct sil_iter *iter)
 
 	clock_gettime(CLOCK_MONOTONIC_RAW, &start);
 	err = xnvme_gpu_io_submit((n_io + GPU_TBSIZE - 1) / GPU_TBSIZE, GPU_TBSIZE,
+				  XNVME_SPEC_NVM_OPC_READ, iter->opts->nlb, iter->opts->nbytes,
+				  iter->gpu_io);
+	if (err) {
+		fprintf(stderr, "Could not launch kernel: %d\n", err);
+		return err;
+	}
+
+	err = xnvme_gpu_sync();
+	if (err) {
+		fprintf(stderr, "Error synchronizing kernels: %d\n", err);
+		return err;
+	}
+	clock_gettime(CLOCK_MONOTONIC_RAW, &end);
+	iter->stats->io_time += (double)(end.tv_sec - start.tv_sec) +
+				(double)(end.tv_nsec - start.tv_nsec) / 1000000000.f;
+	return 0;
+}
+
+int
+sil_gpu_synthetic(struct sil_iter *iter)
+{
+	uint64_t dev_id = 0;
+	void *buffer;
+	struct timespec start, end;
+	int err;
+
+	clock_gettime(CLOCK_MONOTONIC_RAW, &start);
+	for (uint32_t i = 0; i < iter->opts->batch_size; i++) {
+		if (i % GPU_WARPSIZE == 0) {
+			dev_id++;
+		}
+		struct sil_dev *device = iter->devs[dev_id % iter->n_devs];
+		buffer = device->buffers[device->buf++ % device->n_buffers];
+		iter->gpu_io->offsets[i] = i * (iter->opts->nlb + 1);
+		iter->gpu_io->slbas[i] = i * (iter->opts->nlb + 1);
+		iter->gpu_io->buffers[i] = buffer;
+		iter->gpu_io->devs[i] = device->dev;
+	}
+	clock_gettime(CLOCK_MONOTONIC_RAW, &end);
+	iter->stats->prep_time += (double)(end.tv_sec - start.tv_sec) +
+				  (double)(end.tv_nsec - start.tv_nsec) / 1000000000.f;
+	iter->stats->bytes += iter->opts->batch_size * iter->opts->nbytes;
+	iter->stats->io += iter->opts->batch_size;
+	iter->gpu_io->n_io = iter->opts->batch_size;
+
+	clock_gettime(CLOCK_MONOTONIC_RAW, &start);
+	err = xnvme_gpu_io_submit((iter->gpu_io->n_io + GPU_TBSIZE - 1) / GPU_TBSIZE, GPU_TBSIZE,
 				  XNVME_SPEC_NVM_OPC_READ, iter->opts->nlb, iter->opts->nbytes,
 				  iter->gpu_io);
 	if (err) {

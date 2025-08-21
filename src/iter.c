@@ -180,26 +180,22 @@ _xal_setup(struct sil_iter *iter, struct sil_dev *device)
 		return err;
 	}
 
-	if (iter->opts->data_dir) {
-		device->data_dir = iter->opts->data_dir;
+	device->data_dir = iter->opts->data_dir;
 
-		err = xal_walk(xal, xal->root, find_data_dir, device);
-		switch (err) {
-		case DATA_DIR_FOUND:
-			break;
+	err = xal_walk(xal, xal->root, find_data_dir, device);
+	switch (err) {
+	case DATA_DIR_FOUND:
+		break;
 
-		case 0: // Root dir not found
-			fprintf(stderr, "Couldn't find root directory: %s\n", device->data_dir);
-			xal_close(xal);
-			return ENOENT;
+	case 0: // Root dir not found
+		fprintf(stderr, "Couldn't find root directory: %s\n", device->data_dir);
+		xal_close(xal);
+		return ENOENT;
 
-		default:
-			fprintf(stderr, "xal_walk(find_data_dir): %d\n", err);
-			xal_close(xal);
-			return err;
-		}
-	} else {
-		device->root_inode = xal->root;
+	default:
+		fprintf(stderr, "xal_walk(find_data_dir): %d\n", err);
+		xal_close(xal);
+		return err;
 	}
 
 	if (!iter->buffer_size) {
@@ -294,7 +290,7 @@ static int
 _alloc(struct sil_iter *iter)
 {
 	int err;
-	iter->buffers = malloc(sizeof(void *) * iter->opts->batch_size);
+	iter->buffers = malloc(sizeof(void *) * iter->n_buffers);
 	if (!iter->buffers) {
 		err = errno;
 		fprintf(stderr, "Could not allocate array of buffers: %d\n", err);
@@ -303,7 +299,7 @@ _alloc(struct sil_iter *iter)
 
 	for (uint32_t i = 0; i < iter->n_devs; i++) {
 		struct sil_dev *device = iter->devs[i];
-		device->n_buffers = iter->opts->batch_size / iter->n_devs;
+		device->n_buffers = iter->n_buffers / iter->n_devs;
 		device->buf = 0;
 		device->buffers = malloc(sizeof(void *) * device->n_buffers);
 		if (!device->buffers) {
@@ -372,7 +368,7 @@ _alloc(struct sil_iter *iter)
 
 	if (iter->type == SIL_GPU) {
 		err = xnvme_gpu_io_alloc(&iter->gpu_io, (iter->buffer_size / iter->opts->nbytes) *
-							    iter->opts->batch_size);
+							    iter->n_buffers);
 		if (err) {
 			fprintf(stderr, "Could not allocate IO struct: %d\n", err);
 			return err;
@@ -497,49 +493,70 @@ sil_init(struct sil_iter **iter, char **dev_uris, uint32_t n_devs, struct sil_op
 			sil_term(_iter);
 			return err;
 		}
-		err = _xal_setup(_iter, device);
-		if (err) {
-			fprintf(stderr, "XAL setup failed for %s: %d\n", dev_uris[i], err);
-			xnvme_dev_close(device->dev);
-			sil_term(_iter);
-			return err;
+		if (_iter->opts->data_dir) {
+			err = _xal_setup(_iter, device);
+			if (err) {
+				fprintf(stderr, "XAL setup failed for %s: %d\n", dev_uris[i], err);
+				xnvme_dev_close(device->dev);
+				sil_term(_iter);
+				return err;
+			}
 		}
 		_iter->devs[i] = device;
 		_iter->n_devs++;
 	}
 
-	switch (_iter->type) {
-	case SIL_GPU:
-		_iter->io_fn = sil_gpu_submit;
-		break;
-	case SIL_CPU:
-		_iter->io_fn = sil_cpu_submit;
-		break;
-	case SIL_FILE:
-		_iter->io_fn = sil_file_submit;
-		break;
-	}
+	if (_iter->opts->data_dir) {
+		_iter->n_buffers = _iter->opts->batch_size;
+		err = _alloc(_iter);
+		if (err) {
+			sil_term(_iter);
+			return err;
+		}
+		switch (_iter->type) {
+		case SIL_GPU:
+			_iter->io_fn = sil_gpu_submit;
+			break;
+		case SIL_CPU:
+			_iter->io_fn = sil_cpu_submit;
+			break;
+		case SIL_FILE:
+			_iter->io_fn = sil_file_submit;
+			_find_prefix(_iter);
+			break;
+		}
 
-	err = _alloc(_iter);
-	if (err) {
-		sil_term(_iter);
-		return err;
-	}
+		// Create an entry for every file in every directory
+		err = _create_entries(_iter);
+		if (err) {
+			sil_term(_iter);
+			return err;
+		}
 
-	if (_iter->type == SIL_FILE) {
-		_find_prefix(_iter);
-	}
+		// Shuffle the entries
+		srand(time(NULL));
+		_shuffle_data(_iter->data);
 
-	// Create an entry for every file in every directory
-	err = _create_entries(_iter);
-	if (err) {
-		sil_term(_iter);
-		return err;
+	} else {
+		_iter->n_buffers = _iter->n_devs;
+		_iter->buffer_size = _iter->opts->batch_size * _iter->opts->nbytes / _iter->n_devs;
+		err = _alloc(_iter);
+		if (err) {
+			sil_term(_iter);
+			return err;
+		}
+		switch (_iter->type) {
+		case SIL_GPU:
+			_iter->io_fn = sil_gpu_synthetic;
+			break;
+		case SIL_CPU:
+		case SIL_FILE:
+			fprintf(stderr, "%s doesn't support synthetic workloads\n",
+				_iter->opts->backend);
+			sil_term(_iter);
+			return EINVAL;
+		}
 	}
-
-	// Shuffle the entries
-	srand(time(NULL));
-	_shuffle_data(_iter->data);
 
 	(*iter) = _iter;
 
@@ -551,7 +568,7 @@ sil_next(struct sil_iter *iter, void ***buffers)
 {
 	int err;
 
-	if (iter->data->index >= iter->data->n_entries) {
+	if (iter->data && iter->data->index >= iter->data->n_entries) {
 		iter->data->index = 0;
 		_shuffle_data(iter->data);
 	}

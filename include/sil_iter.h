@@ -29,8 +29,9 @@ struct sil_iter {
 	struct xnvme_gpu_io *gpu_io;
 	int (*io_fn)(struct sil_iter *iter);
 	void **buffers;
-	uint32_t n_devs;
+	uint32_t n_buffers;
 	uint64_t buffer_size;
+	uint32_t n_devs;
 	enum sil_type type;
 };
 

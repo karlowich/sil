@@ -34,6 +34,9 @@ int
 sil_gpu_submit(struct sil_iter *iter);
 
 int
+sil_gpu_synthetic(struct sil_iter *iter);
+
+int
 sil_file_submit(struct sil_iter *iter);
 
 #endif
