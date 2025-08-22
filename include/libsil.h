@@ -30,10 +30,12 @@ struct sil_iter;
  */
 struct sil_opts {
 	char *data_dir;	      ///< A directory containing subdirectories with files
-	char *mnt;	      ///< The mointpoint of the drive
-	char *backend;	      ///< The backend to use ("io_uring" or "spdk")
+	char *mnt;	      ///< The mountpoint of the drive
+	char *backend;	      ///< The backend to use
 	uint64_t nbytes;      ///< The number of bytes per I/O
 	uint32_t nlb;	      ///< The number of blocks per I/O (zero-indexed)
+	uint32_t gpu_nqueues; ///< The number of GPU queues to create
+	uint32_t gpu_tbsize;  ///< The size of a GPU threadblock
 	uint32_t queue_depth; ///< The NVMe queue depth
 	uint32_t batch_size;  ///< The number of files per batch
 };
@@ -55,10 +57,13 @@ struct sil_stats {
  * Get default options
  *
  * data_dir = NULL
- * backend = "io_uring"
+ * mnt = "/mnt"
+ * backend = "libnvm-gpu"
  * nlb = 7
  * nbytes = 4096
- * queue_depth = 64
+ * gpu_nqueues = 128
+ * gpu_tbsize = 64
+ * queue_depth = 1024
  * batch_size = 1
  *
  * @returns Struct sil_opts with default settings

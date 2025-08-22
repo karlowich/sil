@@ -19,7 +19,6 @@
 #include <cuda_runtime.h>
 #include <cufile.h>
 
-#define GPU_TBSIZE 64
 #define GPU_WARPSIZE 32
 
 int
@@ -138,9 +137,9 @@ sil_gpu_submit(struct sil_iter *iter)
 	iter->gpu_io->n_io = n_io;
 
 	clock_gettime(CLOCK_MONOTONIC_RAW, &start);
-	err = xnvme_gpu_io_submit((n_io + GPU_TBSIZE - 1) / GPU_TBSIZE, GPU_TBSIZE,
-				  XNVME_SPEC_NVM_OPC_READ, iter->opts->nlb, iter->opts->nbytes,
-				  iter->gpu_io);
+	err = xnvme_gpu_io_submit((n_io + iter->opts->gpu_tbsize - 1) / iter->opts->gpu_tbsize,
+				  iter->opts->gpu_tbsize, XNVME_SPEC_NVM_OPC_READ, iter->opts->nlb,
+				  iter->opts->nbytes, iter->gpu_io);
 	if (err) {
 		fprintf(stderr, "Could not launch kernel: %d\n", err);
 		return err;
@@ -185,9 +184,10 @@ sil_gpu_synthetic(struct sil_iter *iter)
 	iter->gpu_io->n_io = iter->opts->batch_size;
 
 	clock_gettime(CLOCK_MONOTONIC_RAW, &start);
-	err = xnvme_gpu_io_submit((iter->gpu_io->n_io + GPU_TBSIZE - 1) / GPU_TBSIZE, GPU_TBSIZE,
-				  XNVME_SPEC_NVM_OPC_READ, iter->opts->nlb, iter->opts->nbytes,
-				  iter->gpu_io);
+	err = xnvme_gpu_io_submit((iter->gpu_io->n_io + iter->opts->gpu_tbsize - 1) /
+				      iter->opts->gpu_tbsize,
+				  iter->opts->gpu_tbsize, XNVME_SPEC_NVM_OPC_READ, iter->opts->nlb,
+				  iter->opts->nbytes, iter->gpu_io);
 	if (err) {
 		fprintf(stderr, "Could not launch kernel: %d\n", err);
 		return err;

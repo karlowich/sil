@@ -14,9 +14,6 @@
 // Arbitrary value out of range of normal err
 #define DATA_DIR_FOUND 9000
 
-#define GPU_NQ 128
-#define GPU_QD 1024
-
 static int
 inode_cmp(const void *a, const void *b)
 {
@@ -81,7 +78,8 @@ _xnvme_setup(struct sil_iter *iter, struct sil_dev *device, const char *uri)
 	}
 
 	if (iter->type == SIL_GPU) {
-		err = xnvme_gpu_create_queues(dev, GPU_QD, GPU_NQ);
+		err =
+		    xnvme_gpu_create_queues(dev, iter->opts->queue_depth, iter->opts->gpu_nqueues);
 		if (err) {
 			xnvme_dev_close(dev);
 			fprintf(stderr, "xnvme_gpu_create_queues(): %d\n", err);
@@ -592,7 +590,9 @@ sil_opts_default()
 				.backend = "libnvm-gpu",
 				.nlb = 7,
 				.nbytes = 4096,
-				.queue_depth = 64,
+				.gpu_nqueues = 128,
+				.gpu_tbsize = 64,
+				.queue_depth = 1024,
 				.batch_size = 1};
 
 	return opts;

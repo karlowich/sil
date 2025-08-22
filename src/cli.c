@@ -27,6 +27,14 @@ print_help(const char *name)
 			"[default], posix or gds)\n");
 	fprintf(stderr, "\t --mnt \t \t | \t The mountpoint of the drive (default = /mnt). Only "
 			"relevant for backends: 'posix' and 'gds'\n");
+	fprintf(stderr, "\t --nbytes \t | \t The number of bytes per I/O (default = 4096)\n");
+	fprintf(stderr,
+		"\t --nlb \t | \t The number of blocks per I/O (zero-indexed) (default = 7)\n");
+	fprintf(stderr, "\t --gpu-nqueues \t | \t The number of GPU queues to create (default = "
+			"128). Only relevant for backend: 'libnvm-gpu'\n");
+	fprintf(stderr, "\t --gpu-tbsize \t | \t The size of a GPU threadblock (default = 64). "
+			"Only relevant for backend: 'libnvm-gpu'\n");
+	fprintf(stderr, "\t --queue-depth \t | \t The NVMe queue depth (default = 1024)\n");
 	fprintf(stderr,
 		"\t --batch-size \t | \t The number of files to read per batch (default = 1)\n");
 	fprintf(stderr, "\t --batches \t | \t The number of batches to read (default = 1)\n");
@@ -49,6 +57,32 @@ parse_args(int argc, char *argv[], struct sil_cli_args *args, struct sil_opts *o
 			opts->mnt = argv[++i];
 		} else if (strcmp(argv[i], "--backend") == 0) {
 			opts->backend = argv[++i];
+		} else if (strcmp(argv[i], "--nbytes") == 0) {
+			opts->nbytes = strtol(argv[++i], (char **)NULL, 10);
+			if (opts->nbytes <= 0) {
+				fprintf(stderr, "Invalid nbytes: %s\n", argv[i]);
+				return -EINVAL;
+			}
+		} else if (strcmp(argv[i], "--nlb") == 0) {
+			opts->nlb = strtol(argv[++i], (char **)NULL, 10);
+		} else if (strcmp(argv[i], "--gpu-nqueues") == 0) {
+			opts->gpu_nqueues = strtol(argv[++i], (char **)NULL, 10);
+			if (opts->gpu_nqueues <= 0) {
+				fprintf(stderr, "Invalid number of GPU queues: %s\n", argv[i]);
+				return -EINVAL;
+			}
+		} else if (strcmp(argv[i], "--gpu-tbsize") == 0) {
+			opts->gpu_tbsize = strtol(argv[++i], (char **)NULL, 10);
+			if (opts->gpu_tbsize <= 0) {
+				fprintf(stderr, "Invalid GPU threadblock size: %s\n", argv[i]);
+				return -EINVAL;
+			}
+		} else if (strcmp(argv[i], "--queue-depth") == 0) {
+			opts->queue_depth = strtol(argv[++i], (char **)NULL, 10);
+			if (opts->queue_depth <= 0) {
+				fprintf(stderr, "Invalid queue depth: %s\n", argv[i]);
+				return -EINVAL;
+			}
 		} else if (strcmp(argv[i], "--batch-size") == 0) {
 			opts->batch_size = strtol(argv[++i], (char **)NULL, 10);
 			if (opts->batch_size <= 0) {
