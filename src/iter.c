@@ -420,6 +420,7 @@ sil_term(struct sil_iter *iter)
 		free(iter->data->entries);
 		free(iter->data);
 	}
+	free(iter->opts);
 	free(iter->buffers);
 	free(iter->stats);
 	free(iter);
@@ -459,7 +460,13 @@ sil_init(struct sil_iter **iter, char **dev_uris, uint32_t n_devs, struct sil_op
 	}
 	memset(_iter, 0, sizeof(struct sil_iter));
 
-	_iter->opts = opts;
+	_iter->opts = malloc(sizeof(struct sil_opts));
+	if (!_iter->opts) {
+		err = errno;
+		fprintf(stderr, "Conld not allocate opts: %d\n", err);
+		return err;
+	}
+	memcpy(_iter->opts, opts, sizeof(*opts));
 
 	_iter->devs = malloc(sizeof(struct sil_dev *) * n_devs);
 	if (!_iter->devs) {
@@ -491,7 +498,7 @@ sil_init(struct sil_iter **iter, char **dev_uris, uint32_t n_devs, struct sil_op
 			sil_term(_iter);
 			return err;
 		}
-		if (_iter->opts->data_dir) {
+		if (_iter->opts->data_dir[0] != '\0') {
 			err = _xal_setup(_iter, device);
 			if (err) {
 				fprintf(stderr, "XAL setup failed for %s: %d\n", dev_uris[i], err);
@@ -504,7 +511,7 @@ sil_init(struct sil_iter **iter, char **dev_uris, uint32_t n_devs, struct sil_op
 		_iter->n_devs++;
 	}
 
-	if (_iter->opts->data_dir) {
+	if (_iter->opts->data_dir[0] != '\0') {
 		_iter->n_buffers = _iter->opts->batch_size;
 		err = _alloc(_iter);
 		if (err) {
@@ -585,7 +592,7 @@ sil_next(struct sil_iter *iter, void ***buffers)
 struct sil_opts
 sil_opts_default()
 {
-	struct sil_opts opts = {.data_dir = NULL,
+	struct sil_opts opts = {.data_dir = "",
 				.mnt = "/mnt",
 				.backend = "libnvm-gpu",
 				.nlb = 7,
