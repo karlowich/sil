@@ -50,7 +50,7 @@ sources = files(
 
 include_dirs = include_directories('include')
 
-sil_library = static_library('sil',
+sil_library = library('sil',
   sources: sources,
   dependencies: sil_deps,
   include_directories: include_dirs,
