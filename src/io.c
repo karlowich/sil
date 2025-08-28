@@ -48,6 +48,7 @@ sil_cpu_submit(struct sil_iter *iter)
 
 			nbytes = extent.nblocks * device->xal->sb.blocksize;
 			nblocks = nbytes / blocksize;
+			iter->output->buf_len[j + i * device->n_buffers] = file.size;
 
 			for (uint32_t k = 1; k < file.content.extents.count; k++) {
 				next_extent = file.content.extents.extent[k];
@@ -78,7 +79,7 @@ sil_cpu_submit(struct sil_iter *iter)
 		clock_gettime(CLOCK_MONOTONIC_RAW, &start);
 		err = xnvme_io_range_submit(device->queue, XNVME_SPEC_NVM_OPC_READ,
 					    device->cpu_io->slbas, device->cpu_io->elbas,
-					    iter->opts->nlb, iter->opts->nbytes, iter->buffers,
+					    iter->opts->nlb, iter->opts->nbytes, device->buffers,
 					    device->n_buffers);
 		clock_gettime(CLOCK_MONOTONIC_RAW, &end);
 		iter->stats->io_time += (double)(end.tv_sec - start.tv_sec) +
@@ -99,20 +100,24 @@ sil_gpu_submit(struct sil_iter *iter)
 	struct xal_inode file;
 	struct xal_extent extent;
 	uint64_t nblocks, nbytes, blocksize, slba, offset, n_io = 0;
+	uint32_t dev_id, buf_id;
 	void *buffer;
 	struct timespec start, end;
 	int err;
 
 	clock_gettime(CLOCK_MONOTONIC_RAW, &start);
 	for (uint32_t i = 0; i < iter->opts->batch_size; i++) {
-		struct sil_dev *device = iter->devs[i % iter->n_devs];
-		buffer = device->buffers[device->buf++ % device->n_buffers];
+		dev_id = i % iter->n_devs;
+		struct sil_dev *device = iter->devs[dev_id];
+		buf_id = device->buf++ % device->n_buffers;
+		buffer = device->buffers[buf_id];
 		blocksize = xnvme_dev_get_geo(device->dev)->lba_nbytes;
 		offset = 0;
 
 		entry = iter->data->entries[iter->data->index++ % iter->data->n_entries];
 		dir = device->root_inode->content.dentries.inodes[entry.dir];
 		file = dir.content.dentries.inodes[entry.file];
+		iter->output->buf_len[buf_id + dev_id * device->n_buffers] = file.size;
 
 		for (uint32_t j = 0; j < file.content.extents.count; j++) {
 			extent = file.content.extents.extent[j];
@@ -159,7 +164,7 @@ sil_gpu_submit(struct sil_iter *iter)
 int
 sil_gpu_synthetic(struct sil_iter *iter)
 {
-	uint64_t dev_id = 0;
+	uint32_t buf_id, dev_id = 0;
 	void *buffer;
 	struct timespec start, end;
 	int err;
@@ -170,7 +175,10 @@ sil_gpu_synthetic(struct sil_iter *iter)
 			dev_id++;
 		}
 		struct sil_dev *device = iter->devs[dev_id % iter->n_devs];
-		buffer = device->buffers[device->buf++ % device->n_buffers];
+		buf_id = device->buf++ % device->n_buffers;
+		buffer = device->buffers[buf_id];
+		iter->output->buf_len[buf_id + (dev_id % iter->n_devs) * device->n_buffers] +=
+		    iter->opts->nbytes;
 		iter->gpu_io->offsets[i] = i * (iter->opts->nlb + 1);
 		iter->gpu_io->slbas[i] = i * (iter->opts->nlb + 1);
 		iter->gpu_io->buffers[i] = buffer;
@@ -214,6 +222,7 @@ sil_file_submit(struct sil_iter *iter)
 	CUfileError_t status;
 	CUfileDescr_t descr;
 	CUfileHandle_t fh;
+	uint32_t buf_id, dev_id;
 	uint64_t nbytes;
 	void *buffer, *bounce;
 	char *prefix, *path;
@@ -222,16 +231,19 @@ sil_file_submit(struct sil_iter *iter)
 
 	for (uint32_t i = 0; i < iter->opts->batch_size; i++) {
 		clock_gettime(CLOCK_MONOTONIC_RAW, &start);
-		struct sil_dev *device = iter->devs[i % iter->n_devs];
+		dev_id = i % iter->n_devs;
+		struct sil_dev *device = iter->devs[dev_id];
+		buf_id = device->buf++ % device->n_buffers;
+		buffer = device->buffers[buf_id];
 		prefix = device->file_io->prefix;
 		path = device->file_io->path;
-		buffer = device->buffers[device->buf++ % device->n_buffers];
 		bounce = device->file_io->buffer;
 
 		entry = iter->data->entries[iter->data->index++ % iter->data->n_entries];
 		dir = device->root_inode->content.dentries.inodes[entry.dir];
 		file = dir.content.dentries.inodes[entry.file];
 
+		iter->output->buf_len[buf_id + dev_id * device->n_buffers] = file.size;
 		nbytes = (1 + ((file.size - 1) / device->xal->sb.blocksize)) *
 			 (device->xal->sb.blocksize);
 		iter->stats->bytes += nbytes;

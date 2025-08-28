@@ -285,19 +285,34 @@ _shuffle_data(struct sil_data *data)
 }
 
 static int
-_alloc(struct sil_iter *iter)
+_alloc(struct sil_iter *iter, uint32_t n_buffers)
 {
 	int err;
-	iter->buffers = malloc(sizeof(void *) * iter->n_buffers);
-	if (!iter->buffers) {
+	iter->output = malloc(sizeof(struct sil_output));
+	if (!iter->output) {
+		err = errno;
+		fprintf(stderr, "Could not allocate output struct: %d\n", err);
+	}
+	iter->output->n_buffers = n_buffers;
+
+	iter->output->buffers = malloc(sizeof(void *) * iter->output->n_buffers);
+	if (!iter->output->buffers) {
 		err = errno;
 		fprintf(stderr, "Could not allocate array of buffers: %d\n", err);
 		return err;
 	}
 
+	iter->output->buf_len = malloc(sizeof(uint64_t) * iter->output->n_buffers);
+	if (!iter->output->buf_len) {
+		err = errno;
+		fprintf(stderr, "Could not allocate array of buffer lengths: %d\n", err);
+		return err;
+	}
+	memset(iter->output->buf_len, 0, sizeof(uint64_t) * iter->output->n_buffers);
+
 	for (uint32_t i = 0; i < iter->n_devs; i++) {
 		struct sil_dev *device = iter->devs[i];
-		device->n_buffers = iter->n_buffers / iter->n_devs;
+		device->n_buffers = iter->output->n_buffers / iter->n_devs;
 		device->buf = 0;
 		device->buffers = malloc(sizeof(void *) * device->n_buffers);
 		if (!device->buffers) {
@@ -324,7 +339,7 @@ _alloc(struct sil_iter *iter)
 				fprintf(stderr, "Could not allocate buffers[%d]: %d\n", i, err);
 				return err;
 			}
-			iter->buffers[j + i * device->n_buffers] = device->buffers[j];
+			iter->output->buffers[j + i * device->n_buffers] = device->buffers[j];
 		}
 
 		if (iter->type == SIL_CPU) {
@@ -366,7 +381,7 @@ _alloc(struct sil_iter *iter)
 
 	if (iter->type == SIL_GPU) {
 		err = xnvme_gpu_io_alloc(&iter->gpu_io, (iter->buffer_size / iter->opts->nbytes) *
-							    iter->n_buffers);
+							    iter->output->n_buffers);
 		if (err) {
 			fprintf(stderr, "Could not allocate IO struct: %d\n", err);
 			return err;
@@ -421,7 +436,11 @@ sil_term(struct sil_iter *iter)
 		free(iter->data);
 	}
 	free(iter->opts);
-	free(iter->buffers);
+	if (iter->output) {
+		free(iter->output->buffers);
+		free(iter->output->buf_len);
+		free(iter->output);
+	}
 	free(iter->stats);
 	free(iter);
 }
@@ -512,8 +531,7 @@ sil_init(struct sil_iter **iter, char **dev_uris, uint32_t n_devs, struct sil_op
 	}
 
 	if (_iter->opts->data_dir[0] != '\0') {
-		_iter->n_buffers = _iter->opts->batch_size;
-		err = _alloc(_iter);
+		err = _alloc(_iter, _iter->opts->batch_size);
 		if (err) {
 			sil_term(_iter);
 			return err;
@@ -543,9 +561,8 @@ sil_init(struct sil_iter **iter, char **dev_uris, uint32_t n_devs, struct sil_op
 		_shuffle_data(_iter->data);
 
 	} else {
-		_iter->n_buffers = _iter->n_devs;
 		_iter->buffer_size = _iter->opts->batch_size * _iter->opts->nbytes / _iter->n_devs;
-		err = _alloc(_iter);
+		err = _alloc(_iter, _iter->n_devs);
 		if (err) {
 			sil_term(_iter);
 			return err;
@@ -569,7 +586,7 @@ sil_init(struct sil_iter **iter, char **dev_uris, uint32_t n_devs, struct sil_op
 }
 
 int
-sil_next(struct sil_iter *iter, void ***buffers)
+sil_next(struct sil_iter *iter, struct sil_output **output)
 {
 	int err;
 
@@ -584,7 +601,7 @@ sil_next(struct sil_iter *iter, void ***buffers)
 		return err;
 	}
 
-	*buffers = iter->buffers;
+	*output = iter->output;
 
 	return 0;
 }

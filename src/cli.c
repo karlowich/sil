@@ -132,7 +132,7 @@ main(int argc, char *argv[])
 	struct sil_stats *stats;
 	struct timespec total_start, inter_start, inter_end, total_end;
 	struct sil_iter *iter;
-	void **buffers;
+	struct sil_output *output;
 	char **dev_uris;
 	double time;
 	int err;
@@ -163,7 +163,7 @@ main(int argc, char *argv[])
 	clock_gettime(CLOCK_MONOTONIC_RAW, &total_start);
 	clock_gettime(CLOCK_MONOTONIC_RAW, &inter_start);
 	for (uint32_t i = 0; i < args.batches; i++) {
-		err = sil_next(iter, &buffers);
+		err = sil_next(iter, &output);
 		if (err) {
 			fprintf(stderr, "Reading next batch failed, err: %d\n", err);
 			sil_term(iter);

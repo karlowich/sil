@@ -54,6 +54,15 @@ struct sil_stats {
 };
 
 /**
+ * The output format for the SIL iterator
+ */
+struct sil_output {
+	uint32_t n_buffers; ///< The number of buffers
+	uint64_t *buf_len;  ///< The length of each buffer (in bytes)
+	void **buffers;	    ///< The buffers
+};
+
+/**
  * Get default options
  *
  * data_dir = NULL
@@ -98,12 +107,12 @@ sil_init(struct sil_iter **iter, char **dev_uris, uint32_t n_devs, struct sil_op
  * Get the next batch from the SIL iterator
  *
  * @param iter The iterator handle obtained from sil_init()
- * @param buffers The data read as a buffer per file
+ * @param output A struct describing the output
  *
  * @returns 0 on sucess, otherwise `errno`
  */
 int
-sil_next(struct sil_iter *iter, void ***buffers);
+sil_next(struct sil_iter *iter, struct sil_output **output);
 
 /**
  * Terminate the SIL iterator
