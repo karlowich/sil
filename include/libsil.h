@@ -15,6 +15,7 @@
  */
 #ifndef __LIBSIL_H
 #define __LIBSIL_H
+#include <stdbool.h>
 #include <stdint.h>
 
 /**
@@ -38,6 +39,7 @@ struct sil_opts {
 	uint32_t gpu_tbsize;  ///< The size of a GPU threadblock
 	uint32_t queue_depth; ///< The NVMe queue depth
 	uint32_t batch_size;  ///< The number of files per batch
+	bool random;	      ///< Whether to shuffle IO before submission
 };
 
 /**

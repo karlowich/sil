@@ -179,10 +179,10 @@ sil_gpu_synthetic(struct sil_iter *iter)
 		buffer = device->buffers[buf_id];
 		iter->output->buf_len[buf_id + (dev_id % iter->n_devs) * device->n_buffers] +=
 		    iter->opts->nbytes;
-		iter->gpu_io->offsets[i] = i * (iter->opts->nlb + 1);
-		iter->gpu_io->slbas[i] = i * (iter->opts->nlb + 1);
-		iter->gpu_io->buffers[i] = buffer;
-		iter->gpu_io->devs[i] = device->dev;
+		iter->gpu_io->offsets[iter->data->io_pattern[i]] = i * (iter->opts->nlb + 1);
+		iter->gpu_io->slbas[iter->data->io_pattern[i]] = i * (iter->opts->nlb + 1);
+		iter->gpu_io->buffers[iter->data->io_pattern[i]] = buffer;
+		iter->gpu_io->devs[iter->data->io_pattern[i]] = device->dev;
 	}
 	clock_gettime(CLOCK_MONOTONIC_RAW, &end);
 	iter->stats->prep_time += (double)(end.tv_sec - start.tv_sec) +

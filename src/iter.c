@@ -222,20 +222,11 @@ _xal_setup(struct sil_iter *iter, struct sil_dev *device)
 static int
 _create_entries(struct sil_iter *iter)
 {
-	struct sil_data *data;
 	struct sil_entry *entries;
 	struct xal_dentries root_dentries = iter->devs[0]->root_inode->content.dentries;
 	uint64_t n_entries = 0;
 	int err;
 	int k;
-
-	data = malloc(sizeof(struct sil_data));
-	if (!data) {
-		err = errno;
-		fprintf(stderr, "Could not allocate data: %d\n", err);
-		return err;
-	}
-	memset(data, 0, sizeof(struct sil_data));
 
 	for (uint32_t i = 0; i < root_dentries.count; i++) {
 		n_entries += root_dentries.inodes[i].content.dentries.count;
@@ -257,31 +248,10 @@ _create_entries(struct sil_iter *iter)
 		}
 	}
 
-	iter->data = data;
 	iter->data->entries = entries;
 	iter->data->n_entries = n_entries;
 
 	return 0;
-}
-
-static void
-_swap_entries(struct sil_entry *entries, int a, int b)
-{
-	struct sil_entry tmp = entries[a];
-	entries[a] = entries[b];
-	entries[b] = tmp;
-}
-
-static void
-_shuffle_data(struct sil_data *data)
-{
-	int n;
-
-	// Knuth-Fisher-Yates
-	for (int i = data->n_entries - 1; i > 0; i--) {
-		n = rand() % (i + 1);
-		_swap_entries(data->entries, i, n);
-	}
 }
 
 static int
@@ -387,6 +357,28 @@ _alloc(struct sil_iter *iter, uint32_t n_buffers)
 			return err;
 		}
 	}
+
+	iter->data = malloc(sizeof(struct sil_data));
+	if (!iter->data) {
+		err = errno;
+		fprintf(stderr, "Could not allocate data: %d\n", err);
+		return err;
+	}
+	memset(iter->data, 0, sizeof(struct sil_data));
+
+	iter->data->io_pattern = malloc(sizeof(uint32_t) * iter->opts->batch_size);
+	if (!iter->data->io_pattern) {
+		err = errno;
+		fprintf(stderr, "Could not allocate io_pattern: %d\n", err);
+		return err;
+	}
+	for (uint32_t i = 0; i < iter->opts->batch_size; i++) {
+		iter->data->io_pattern[i] = i;
+	}
+	if (iter->opts->random) {
+		SIL_SHUFFLE(iter->data->io_pattern, uint32_t, iter->opts->batch_size, uint32_t);
+	}
+
 	return 0;
 }
 
@@ -464,6 +456,7 @@ int
 sil_init(struct sil_iter **iter, char **dev_uris, uint32_t n_devs, struct sil_opts *opts)
 {
 	struct sil_iter *_iter;
+	srand(time(NULL));
 	int err;
 
 	if (opts->batch_size % n_devs != 0) {
@@ -531,6 +524,12 @@ sil_init(struct sil_iter **iter, char **dev_uris, uint32_t n_devs, struct sil_op
 	}
 
 	if (_iter->opts->data_dir[0] != '\0') {
+		if (_iter->opts->random) {
+			fprintf(
+			    stderr,
+			    "Shuffling IOs before submission is not supported when reading files\n");
+			return EINVAL;
+		}
 		err = _alloc(_iter, _iter->opts->batch_size);
 		if (err) {
 			sil_term(_iter);
@@ -556,9 +555,8 @@ sil_init(struct sil_iter **iter, char **dev_uris, uint32_t n_devs, struct sil_op
 			return err;
 		}
 
-		// Shuffle the entries
-		srand(time(NULL));
-		_shuffle_data(_iter->data);
+		SIL_SHUFFLE(_iter->data->entries, struct sil_entry, _iter->data->n_entries,
+			    uint64_t);
 
 	} else {
 		_iter->buffer_size = _iter->opts->batch_size * _iter->opts->nbytes / _iter->n_devs;
@@ -590,9 +588,9 @@ sil_next(struct sil_iter *iter, struct sil_output **output)
 {
 	int err;
 
-	if (iter->data && iter->data->index >= iter->data->n_entries) {
+	if (iter->data->entries && iter->data->index >= iter->data->n_entries) {
 		iter->data->index = 0;
-		_shuffle_data(iter->data);
+		SIL_SHUFFLE(iter->data->entries, struct sil_entry, iter->data->n_entries, uint64_t);
 	}
 
 	err = iter->io_fn(iter);
@@ -617,7 +615,8 @@ sil_opts_default()
 				.gpu_nqueues = 128,
 				.gpu_tbsize = 64,
 				.queue_depth = 1024,
-				.batch_size = 1};
+				.batch_size = 1,
+				.random = false};
 
 	return opts;
 }
