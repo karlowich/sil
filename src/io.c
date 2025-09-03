@@ -93,6 +93,47 @@ sil_cpu_submit(struct sil_iter *iter)
 }
 
 int
+sil_cpu_synthetic(struct sil_iter *iter)
+{
+	struct timespec start, end;
+	int err;
+
+	clock_gettime(CLOCK_MONOTONIC_RAW, &start);
+	for (uint32_t i = 0; i < iter->n_devs; i++) {
+		clock_gettime(CLOCK_MONOTONIC_RAW, &start);
+		struct sil_dev *device = iter->devs[i];
+		for (uint32_t j = 0; j < device->n_buffers; j++) {
+			iter->output->buf_len[j + i * device->n_buffers] +=
+			    iter->opts->batch_size * iter->opts->nbytes;
+			device->cpu_io->slbas[j] = 0;
+			device->cpu_io->elbas[j] = (iter->opts->batch_size * (iter->opts->nlb + 1)) - 1;
+
+			iter->stats->bytes += iter->opts->batch_size * iter->opts->nbytes;
+			iter->stats->io += iter->opts->batch_size;
+		}
+
+		clock_gettime(CLOCK_MONOTONIC_RAW, &end);
+		iter->stats->prep_time += (double)(end.tv_sec - start.tv_sec) +
+					  (double)(end.tv_nsec - start.tv_nsec) / 1000000000.f;
+
+		clock_gettime(CLOCK_MONOTONIC_RAW, &start);
+		err = xnvme_io_range_submit(device->queue, XNVME_SPEC_NVM_OPC_READ,
+					    device->cpu_io->slbas, device->cpu_io->elbas,
+					    iter->opts->nlb, iter->opts->nbytes, device->buffers,
+					    device->n_buffers);
+		clock_gettime(CLOCK_MONOTONIC_RAW, &end);
+		iter->stats->io_time += (double)(end.tv_sec - start.tv_sec) +
+					(double)(end.tv_nsec - start.tv_nsec) / 1000000000.f;
+		if (err) {
+			fprintf(stderr, "IO failed: %d\n", err);
+			return err;
+		}
+	}
+
+	return 0;
+}
+
+int
 sil_gpu_submit(struct sil_iter *iter)
 {
 	struct sil_entry entry;

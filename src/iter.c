@@ -570,6 +570,14 @@ sil_init(struct sil_iter **iter, char **dev_uris, uint32_t n_devs, struct sil_op
 			_iter->io_fn = sil_gpu_synthetic;
 			break;
 		case SIL_CPU:
+			if (_iter->opts->random) {
+				fprintf(
+				    stderr,
+				    "Shuffling IOs before submission is not supported with CPU-based backend");
+				return EINVAL;
+			}
+			_iter->io_fn = sil_cpu_synthetic;
+			break;
 		case SIL_FILE:
 			fprintf(stderr, "%s doesn't support synthetic workloads\n",
 				_iter->opts->backend);
