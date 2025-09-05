@@ -137,7 +137,8 @@ main(int argc, char *argv[])
 	struct sil_iter *iter;
 	struct sil_output *output;
 	char **dev_uris;
-	double time;
+	double time, elapsed;
+	uint64_t bytes = 0, io = 0;
 	int err;
 
 	err = parse_args(argc, argv, &args, &opts);
@@ -177,38 +178,46 @@ main(int argc, char *argv[])
 		       (double)(inter_end.tv_nsec - inter_start.tv_nsec) / 1000000000.f;
 
 		if (time >= 1.f) {
-			time = (double)(inter_end.tv_sec - total_start.tv_sec) +
-			       (double)(inter_end.tv_nsec - total_start.tv_nsec) / 1000000000.f;
-			printf("%lf, %u, %lf, %lf\n", time, i, stats->io / time,
-			       (stats->bytes / 1024.f / 1024.f) / time);
+			elapsed = (double)(inter_end.tv_sec - total_start.tv_sec) +
+				  (double)(inter_end.tv_nsec - total_start.tv_nsec) / 1000000000.f;
+			printf("%lf, %u, %lf, %lf\n", elapsed, i + 1, (stats->io - io) / time,
+			       ((stats->bytes - bytes) / 1024.f / 1024.f) / time);
 			clock_gettime(CLOCK_MONOTONIC_RAW, &inter_start);
+			io = stats->io;
+			bytes = stats->bytes;
 		}
 	}
 	clock_gettime(CLOCK_MONOTONIC_RAW, &total_end);
-	time = (double)(total_end.tv_sec - total_start.tv_sec) +
-	       (double)(total_end.tv_nsec - total_start.tv_nsec) / 1000000000.f;
-	printf("%lf, %u, %lf, %lf\n", time, args.batches, stats->io / time,
-	       (stats->bytes / 1024.f / 1024.f) / time);
+	elapsed = (double)(total_end.tv_sec - total_start.tv_sec) +
+		  (double)(total_end.tv_nsec - total_start.tv_nsec) / 1000000000.f;
+	if (stats->io - io != 0) {
+		time = (double)(total_end.tv_sec - inter_start.tv_sec) +
+		       (double)(total_end.tv_nsec - inter_start.tv_nsec) / 1000000000.f;
+		printf("%lf, %u, %lf, %lf\n", elapsed, args.batches, (stats->io - io) / time,
+		       ((stats->bytes - bytes) / 1024.f / 1024.f) / time);
+	}
 
 	if (args.summary) {
 		printf("\nIO stats:\n");
-		printf("\tTotal time: %lf\n", time);
+		printf("\tTotal time: %lf\n", elapsed);
 		printf("\tPrep time: %lf\n", stats->prep_time);
 		printf("\tIO time: %lf\n", stats->io_time);
 		if (opts.data_dir[0] == '\0') {
 			printf("\t -- SYNTHETIC NUMBERS EXCLUDING PREP TIME -- \n");
 			time = stats->io_time;
 		}
-		printf("\tFile/s: %lf\n", (args.batches * opts.batch_size) / time);
-		printf("\tMiB/s: %lf\n", (stats->bytes / 1024.f / 1024.f) / time);
-		printf("\tIOPS: %lf\n", stats->io / time);
+		printf("\tFile/s: %lf\n", (args.batches * opts.batch_size) / elapsed);
+		printf("\tMiB/s: %lf\n", (stats->bytes / 1024.f / 1024.f) / elapsed);
+		printf("\tIOPS: %lf\n", stats->io / elapsed);
 		printf("\tNumber of IOs: %lu\n", stats->io);
-		printf("Dataset stats:\n");
-		printf("\tNumber of files in the dataset: %lu\n", stats->n_files);
-		printf("\tMaximum size of files in the dataset (KiB): %lu\n",
-		       stats->max_file_size / 1024);
-		printf("\tAverage size of files in the dataset (KiB): %lf\n",
-		       stats->avg_file_size / 1024);
+		if (opts.data_dir[0] != '\0') {
+			printf("Dataset stats:\n");
+			printf("\tNumber of files in the dataset: %lu\n", stats->n_files);
+			printf("\tMaximum size of files in the dataset (KiB): %lu\n",
+			       stats->max_file_size / 1024);
+			printf("\tAverage size of files in the dataset (KiB): %lf\n",
+			       stats->avg_file_size / 1024);
+		}
 	}
 	sil_term(iter);
 
