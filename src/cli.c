@@ -39,6 +39,7 @@ print_help(const char *name)
 		"\t --batch-size \t | \t The number of files to read per batch (default = 1)\n");
 	fprintf(stderr, "\t --batches \t | \t The number of batches to read (default = 1)\n");
 	fprintf(stderr, "\t --random \t | \t Shuffle IO before submission\n");
+	fprintf(stderr, "\t --buffered \t | \t Don't open with O_DIRECT when using POSIX\n");
 	fprintf(stderr, "\t --summary \t | \t Print IO and dataset stats\n");
 	fprintf(stderr, "\t --help \t | \t Print this message\n");
 }
@@ -98,6 +99,8 @@ parse_args(int argc, char *argv[], struct sil_cli_args *args, struct sil_opts *o
 			}
 		} else if (strcmp(argv[i], "--random") == 0) {
 			opts->random = true;
+		} else if (strcmp(argv[i], "--buffered") == 0) {
+			opts->buffered = true;
 		} else if (strcmp(argv[i], "--summary") == 0) {
 			args->summary = true;
 		} else if (strcmp(argv[i], "--help") == 0) {

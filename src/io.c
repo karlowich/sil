@@ -106,7 +106,8 @@ sil_cpu_synthetic(struct sil_iter *iter)
 			iter->output->buf_len[j + i * device->n_buffers] +=
 			    iter->opts->batch_size * iter->opts->nbytes;
 			device->cpu_io->slbas[j] = 0;
-			device->cpu_io->elbas[j] = (iter->opts->batch_size * (iter->opts->nlb + 1)) - 1;
+			device->cpu_io->elbas[j] =
+			    (iter->opts->batch_size * (iter->opts->nlb + 1)) - 1;
 
 			iter->stats->bytes += iter->opts->batch_size * iter->opts->nbytes;
 			iter->stats->io += iter->opts->batch_size;
@@ -298,9 +299,10 @@ sil_file_submit(struct sil_iter *iter)
 
 		is_gds = strcmp(iter->opts->backend, "gds") == 0;
 
-		flags = O_RDONLY;
-		if (is_gds) {
-			flags = flags | O_DIRECT;
+		if (!is_gds && iter->opts->buffered) {
+			flags = O_RDONLY;
+		} else {
+			flags = O_RDONLY | O_DIRECT;
 		}
 
 		fd = open(path, flags);

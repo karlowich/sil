@@ -525,9 +525,8 @@ sil_init(struct sil_iter **iter, char **dev_uris, uint32_t n_devs, struct sil_op
 
 	if (_iter->opts->data_dir[0] != '\0') {
 		if (_iter->opts->random) {
-			fprintf(
-			    stderr,
-			    "Shuffling IOs before submission is not supported when reading files\n");
+			fprintf(stderr, "Shuffling IOs before submission is not supported when "
+					"reading files\n");
 			return EINVAL;
 		}
 		err = _alloc(_iter, _iter->opts->batch_size);
@@ -571,9 +570,8 @@ sil_init(struct sil_iter **iter, char **dev_uris, uint32_t n_devs, struct sil_op
 			break;
 		case SIL_CPU:
 			if (_iter->opts->random) {
-				fprintf(
-				    stderr,
-				    "Shuffling IOs before submission is not supported with CPU-based backend");
+				fprintf(stderr, "Shuffling IOs before submission is not supported "
+						"with CPU-based backend");
 				return EINVAL;
 			}
 			_iter->io_fn = sil_cpu_synthetic;
@@ -624,7 +622,8 @@ sil_opts_default()
 				.gpu_tbsize = 64,
 				.queue_depth = 1024,
 				.batch_size = 1,
-				.random = false};
+				.random = false,
+				.buffered = false};
 
 	return opts;
 }
