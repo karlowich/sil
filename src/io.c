@@ -70,7 +70,7 @@ sil_cpu_submit(struct sil_iter *iter)
 			}
 			device->cpu_io->elbas[j] = device->cpu_io->slbas[j] + nblocks - 1;
 			iter->stats->io += nblocks / (iter->opts->nlb + 1);
-			iter->stats->bytes += nbytes;
+			iter->stats->bytes += file.size;
 		}
 		clock_gettime(CLOCK_MONOTONIC_RAW, &end);
 		iter->stats->prep_time += (double)(end.tv_sec - start.tv_sec) +
@@ -160,13 +160,12 @@ sil_gpu_submit(struct sil_iter *iter)
 		dir = device->root_inode->content.dentries.inodes[entry.dir];
 		file = dir.content.dentries.inodes[entry.file];
 		iter->output->buf_len[buf_id + dev_id * device->n_buffers] = file.size;
-
+		iter->stats->bytes += file.size;
 		for (uint32_t j = 0; j < file.content.extents.count; j++) {
 			extent = file.content.extents.extent[j];
 			slba = xal_fsbno_offset(device->xal, extent.start_block) / blocksize;
 			nbytes = extent.nblocks * device->xal->sb.blocksize;
 			nblocks = nbytes / blocksize;
-			iter->stats->bytes += nbytes;
 			for (uint64_t k = 0; k < nblocks / (iter->opts->nlb + 1); k++) {
 				iter->gpu_io->offsets[n_io] = offset * (iter->opts->nlb + 1);
 				iter->gpu_io->slbas[n_io] = slba + k * (iter->opts->nlb + 1);
@@ -268,7 +267,8 @@ sil_file_submit(struct sil_iter *iter)
 	uint64_t nbytes;
 	void *buffer, *bounce;
 	char *prefix, *path;
-	int err, fd, flags;
+	int fd, flags;
+	ssize_t err, bytes_read;
 	bool is_gds;
 
 	for (uint32_t i = 0; i < iter->opts->batch_size; i++) {
@@ -286,10 +286,8 @@ sil_file_submit(struct sil_iter *iter)
 		file = dir.content.dentries.inodes[entry.file];
 
 		iter->output->buf_len[buf_id + dev_id * device->n_buffers] = file.size;
-		nbytes = (1 + ((file.size - 1) / device->xal->sb.blocksize)) *
-			 (device->xal->sb.blocksize);
-		iter->stats->bytes += nbytes;
-		iter->stats->io += nbytes / iter->opts->nbytes;
+		iter->stats->bytes += file.size;
+		iter->stats->io++;
 
 		memcpy(path, prefix, strlen(prefix) + 1);
 		strcat(path, "/");
@@ -299,16 +297,22 @@ sil_file_submit(struct sil_iter *iter)
 
 		is_gds = strcmp(iter->opts->backend, "gds") == 0;
 
+		nbytes = file.size;
 		if (!is_gds && iter->opts->buffered) {
 			flags = O_RDONLY;
 		} else {
+			if (!is_gds && !iter->opts->buffered) {
+				// POSIX O_DIRECT requires aligned nbytes
+				nbytes = (1 + ((file.size - 1) / device->xal->sb.blocksize)) *
+					 (device->xal->sb.blocksize);
+			}
 			flags = O_RDONLY | O_DIRECT;
 		}
 
 		fd = open(path, flags);
 		if (fd == -1) {
 			err = errno;
-			fprintf(stderr, "Could not open %s, err: %d\n", path, err);
+			fprintf(stderr, "Could not open %s, err: %ld\n", path, err);
 			return err;
 		}
 
@@ -329,24 +333,44 @@ sil_file_submit(struct sil_iter *iter)
 					  (double)(end.tv_nsec - start.tv_nsec) / 1000000000.f;
 
 		clock_gettime(CLOCK_MONOTONIC_RAW, &start);
+		bytes_read = 0;
 		if (is_gds) {
-			err = cuFileRead(fh, buffer, nbytes, 0, 0);
-			if (err < 0) {
-				fprintf(stderr, "Could not read %s, err: %d\n", path, err);
+
+			bytes_read = cuFileRead(fh, buffer, nbytes, 0, 0);
+			if (bytes_read < 0) {
+				err = bytes_read;
+				fprintf(stderr, "Could not read %s, err: %ld\n", path, err);
 				return err;
+			}
+			if ((uint64_t)bytes_read != nbytes) {
+				fprintf(
+				    stderr,
+				    "Could not read entire file %s, expected: %lu, actual: %ld\n",
+				    path, file.size, bytes_read);
+				return EIO;
 			}
 			cuFileHandleDeregister(fh);
 		} else {
-			err = read(fd, bounce, nbytes);
-			if (err == -1) {
-				err = errno;
-				fprintf(stderr, "Could not read %s, err: %d\n", path, err);
-				return err;
-			}
+			do {
+				err = read(fd, bounce, nbytes - bytes_read);
+				if (err == -1) {
+					err = errno;
+					fprintf(stderr, "Could not read %s, err: %ld\n", path, err);
+					return err;
+				}
+				if (err == 0) {
+					fprintf(stderr,
+						"Could not read entire file %s, expected: %lu, "
+						"actual: %ld\n",
+						path, file.size, bytes_read);
+					return EIO;
+				}
+				bytes_read += err;
+			} while ((uint64_t)bytes_read != file.size);
 
-			err = cudaMemcpy(buffer, bounce, nbytes, cudaMemcpyHostToDevice);
+			err = cudaMemcpy(buffer, bounce, file.size, cudaMemcpyHostToDevice);
 			if (err) {
-				fprintf(stderr, "Could not copy data to GPU memory, err: %d\n",
+				fprintf(stderr, "Could not copy data to GPU memory, err: %ld\n",
 					err);
 				return err;
 			}
