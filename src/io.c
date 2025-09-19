@@ -49,6 +49,7 @@ sil_cpu_submit(struct sil_iter *iter)
 			nbytes = extent.nblocks * device->xal->sb.blocksize;
 			nblocks = nbytes / blocksize;
 			iter->output->buf_len[j + i * device->n_buffers] = file.size;
+			iter->output->labels[j + i * device->n_buffers] = entry.dir;
 
 			for (uint32_t k = 1; k < file.content.extents.count; k++) {
 				next_extent = file.content.extents.extent[k];
@@ -105,6 +106,7 @@ sil_cpu_synthetic(struct sil_iter *iter)
 		for (uint32_t j = 0; j < device->n_buffers; j++) {
 			iter->output->buf_len[j + i * device->n_buffers] +=
 			    iter->opts->batch_size * iter->opts->nbytes;
+			iter->output->labels[j + i * device->n_buffers] = 0;
 			device->cpu_io->slbas[j] = 0;
 			device->cpu_io->elbas[j] =
 			    (iter->opts->batch_size * (iter->opts->nlb + 1)) - 1;
@@ -160,6 +162,7 @@ sil_gpu_submit(struct sil_iter *iter)
 		dir = device->root_inode->content.dentries.inodes[entry.dir];
 		file = dir.content.dentries.inodes[entry.file];
 		iter->output->buf_len[buf_id + dev_id * device->n_buffers] = file.size;
+		iter->output->labels[buf_id + dev_id * device->n_buffers] = entry.dir;
 		iter->stats->bytes += file.size;
 		for (uint32_t j = 0; j < file.content.extents.count; j++) {
 			extent = file.content.extents.extent[j];
@@ -220,6 +223,7 @@ sil_gpu_synthetic(struct sil_iter *iter)
 		buffer = device->buffers[buf_id];
 		iter->output->buf_len[buf_id + (dev_id % iter->n_devs) * device->n_buffers] +=
 		    iter->opts->nbytes;
+		iter->output->labels[buf_id + (dev_id % iter->n_devs) * device->n_buffers] = 0;
 		iter->gpu_io->offsets[iter->data->io_pattern[i]] = i * (iter->opts->nlb + 1);
 		iter->gpu_io->slbas[iter->data->io_pattern[i]] = i * (iter->opts->nlb + 1);
 		iter->gpu_io->buffers[iter->data->io_pattern[i]] = buffer;
@@ -286,6 +290,7 @@ sil_file_submit(struct sil_iter *iter)
 		file = dir.content.dentries.inodes[entry.file];
 
 		iter->output->buf_len[buf_id + dev_id * device->n_buffers] = file.size;
+		iter->output->labels[buf_id + dev_id * device->n_buffers] = entry.dir;
 		iter->stats->bytes += file.size;
 		iter->stats->io++;
 

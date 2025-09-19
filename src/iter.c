@@ -272,6 +272,13 @@ _alloc(struct sil_iter *iter, uint32_t n_buffers)
 		return err;
 	}
 
+	iter->output->labels = malloc(sizeof(uint32_t) * iter->output->n_buffers);
+	if (!iter->output->labels) {
+		err = errno;
+		fprintf(stderr, "Could not allocate array of labels: %d\n", err);
+		return err;
+	}
+
 	iter->output->buf_len = malloc(sizeof(uint64_t) * iter->output->n_buffers);
 	if (!iter->output->buf_len) {
 		err = errno;
@@ -430,6 +437,7 @@ sil_term(struct sil_iter *iter)
 	free(iter->opts);
 	if (iter->output) {
 		free(iter->output->buffers);
+		free(iter->output->labels);
 		free(iter->output->buf_len);
 		free(iter->output);
 	}

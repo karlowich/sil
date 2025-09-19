@@ -60,8 +60,9 @@ struct sil_stats {
  * The output format for the SIL iterator
  */
 struct sil_output {
-	uint32_t n_buffers; ///< The number of buffers
+	uint32_t n_buffers; ///< The number of buffers (and labels)
 	uint64_t *buf_len;  ///< The length of each buffer (in bytes)
+	uint32_t *labels;   ///< The label for each buffer
 	void **buffers;	    ///< The buffers
 };
 
