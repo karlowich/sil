@@ -1,6 +1,8 @@
 #ifndef __SIL_IO_H
 #define __SIL_IO_H
 
+#include <cuda_runtime.h>
+#include <cufile.h>
 #include <limits.h>
 #include <stdint.h>
 
@@ -27,6 +29,14 @@ struct sil_file_io {
 	void *buffer;
 };
 
+struct sil_gds_io {
+	CUfileDescr_t *descr;
+	CUfileHandle_t *handle;
+	size_t *expected;
+	ssize_t *actual;
+	cudaStream_t *streams;
+};
+
 int
 sil_cpu_submit(struct sil_iter *iter);
 
@@ -41,5 +51,8 @@ sil_gpu_synthetic(struct sil_iter *iter);
 
 int
 sil_file_submit(struct sil_iter *iter);
+
+int
+sil_gds_async_submit(struct sil_iter *iter);
 
 #endif

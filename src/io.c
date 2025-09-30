@@ -20,6 +20,7 @@
 #include <cufile.h>
 
 #define GPU_WARPSIZE 32
+#define MAX_BATCH_IOS 128
 
 int
 sil_cpu_submit(struct sil_iter *iter)
@@ -386,4 +387,111 @@ sil_file_submit(struct sil_iter *iter)
 		close(fd);
 	}
 	return 0;
+}
+
+int
+sil_gds_async_submit(struct sil_iter *iter)
+{
+	struct sil_entry entry;
+	struct xal_inode dir;
+	struct xal_inode file;
+	struct timespec start, end;
+	struct sil_gds_io *gds_io;
+	CUfileError_t status;
+	uint32_t buf_id, dev_id;
+	void *buffer;
+	char *prefix, *path;
+	int fd, flags, err = 0;
+	off_t offset = 0;
+
+	gds_io = iter->gds_io;
+	clock_gettime(CLOCK_MONOTONIC_RAW, &start);
+	for (uint32_t i = 0; i < iter->opts->batch_size; i++) {
+		dev_id = i % iter->n_devs;
+		struct sil_dev *device = iter->devs[dev_id];
+		buf_id = device->buf++ % device->n_buffers;
+		buffer = device->buffers[buf_id];
+		prefix = device->file_io->prefix;
+		path = device->file_io->path;
+
+		entry = iter->data->entries[iter->data->index++ % iter->data->n_entries];
+		dir = device->root_inode->content.dentries.inodes[entry.dir];
+		file = dir.content.dentries.inodes[entry.file];
+
+		iter->output->buf_len[buf_id + dev_id * device->n_buffers] = file.size;
+		iter->output->labels[buf_id + dev_id * device->n_buffers] = entry.dir;
+		iter->stats->bytes += file.size;
+		iter->stats->io++;
+
+		memcpy(path, prefix, strlen(prefix) + 1);
+		strcat(path, "/");
+		strcat(path, dir.name);
+		strcat(path, "/");
+		strcat(path, file.name);
+
+		flags = O_RDONLY | O_DIRECT;
+
+		fd = open(path, flags);
+		if (fd == -1) {
+			err = errno;
+			fprintf(stderr, "Could not open %s, err: %d\n", path, err);
+			return err;
+		}
+
+		memset(&gds_io->descr[i], 0, sizeof(CUfileDescr_t));
+		gds_io->descr[i].handle.fd = fd;
+		gds_io->descr[i].type = CU_FILE_HANDLE_TYPE_OPAQUE_FD;
+		status = cuFileHandleRegister(&gds_io->handle[i], &gds_io->descr[i]);
+		if (status.err != CU_FILE_SUCCESS) {
+			fprintf(stderr, "Could not register file, err: %d\n", status.err);
+			close(fd);
+			return status.err;
+		}
+		gds_io->expected[i] = file.size;
+		gds_io->actual[i] = 0;
+
+		status = cuFileReadAsync(gds_io->handle[i], buffer, &gds_io->expected[i], &offset, &offset, &gds_io->actual[i],
+				    gds_io->streams[i]);
+		if (status.err != CU_FILE_SUCCESS) {
+			fprintf(stderr, "Could not register file, err: %d\n", status.err);
+			err = status.err;
+			goto teardown;
+		}
+	}
+
+	clock_gettime(CLOCK_MONOTONIC_RAW, &end);
+	iter->stats->prep_time += (double)(end.tv_sec - start.tv_sec) +
+				  (double)(end.tv_nsec - start.tv_nsec) / 1000000000.f;
+
+	clock_gettime(CLOCK_MONOTONIC_RAW, &start);
+	for (uint32_t i = 0; i < iter->opts->batch_size; i++) {
+		err = cudaStreamSynchronize(gds_io->streams[i]);
+		if (err) {
+			fprintf(stderr, "Could not synchronize CUDA Stream, err: %d\n", err);
+			goto teardown;
+		}
+		if (gds_io->actual[i] < 0) {
+			err = gds_io->actual[i];
+			fprintf(stderr, "Reading failed, err: %d\n", err);
+			goto teardown;
+		}
+		if ((size_t)gds_io->actual[i] != gds_io->expected[i]) {
+			fprintf(stderr,
+				"Could not read entire file, expected: %lu, actual: %lu\n",
+				gds_io->expected[i], gds_io->actual[i]);
+			err = EIO;
+			goto teardown;
+		}
+	}
+	clock_gettime(CLOCK_MONOTONIC_RAW, &end);
+	iter->stats->io_time += (double)(end.tv_sec - start.tv_sec) +
+				(double)(end.tv_nsec - start.tv_nsec) / 1000000000.f;
+
+teardown:
+	for (uint32_t i = 0; i < iter->opts->batch_size; i++) {
+		fd = gds_io->descr[i].handle.fd;
+		cuFileHandleDeregister(gds_io->handle[i]);
+		close(fd);
+	}
+	return err;
 }

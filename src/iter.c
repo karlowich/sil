@@ -368,6 +368,59 @@ _alloc(struct sil_iter *iter, uint32_t n_buffers)
 		}
 	}
 
+	if (iter->opts->async) {
+		iter->gds_io = malloc(sizeof(struct sil_gds_io));
+		if (!iter->gds_io) {
+			err = errno;
+			fprintf(stderr, "Could not allocate GDS IO struct: %d\n", err);
+			return err;
+		}
+
+		iter->gds_io->descr = malloc(sizeof(CUfileDescr_t) * iter->opts->batch_size);
+		if (!iter->gds_io->descr) {
+			err = errno;
+			fprintf(stderr, "Could not allocate cuFile descriptors: %d\n", err);
+			return err;
+		}
+
+		iter->gds_io->handle = malloc(sizeof(CUfileHandle_t) * iter->opts->batch_size);
+		if (!iter->gds_io->handle) {
+			err = errno;
+			fprintf(stderr, "Could not allocate cuFile handles: %d\n", err);
+			return err;
+		}
+
+		iter->gds_io->expected = malloc(sizeof(size_t) * iter->opts->batch_size);
+		if (!iter->gds_io->expected) {
+			err = errno;
+			fprintf(stderr, "Could not allocate array of expected values: %d\n", err);
+			return err;
+		}
+
+		iter->gds_io->actual = malloc(sizeof(ssize_t) * iter->opts->batch_size);
+		if (!iter->gds_io->actual) {
+			err = errno;
+			fprintf(stderr, "Could not allocate array of actual values: %d\n", err);
+			return err;
+		}
+
+		iter->gds_io->streams = malloc(sizeof(cudaStream_t) * iter->opts->batch_size);
+		if (!iter->gds_io->streams) {
+			err = errno;
+			fprintf(stderr, "Could not allocate array of CUDA Streams: %d\n", err);
+			return err;
+		}
+
+		for (uint32_t i = 0; i < iter->opts->batch_size; i++) {
+			err = cudaStreamCreateWithFlags(&iter->gds_io->streams[i],
+							cudaStreamNonBlocking);
+			if (err) {
+				fprintf(stderr, "Could not setup CUDA Stream, err: %d\n", err);
+				return err;
+			}
+		}
+	}
+
 	if (iter->type == SIL_GPU) {
 		err = xnvme_gpu_io_alloc(&iter->gpu_io, (iter->buffer_size / iter->opts->nbytes) *
 							    iter->output->n_buffers);
@@ -439,7 +492,16 @@ sil_term(struct sil_iter *iter)
 		free(device->buffers);
 		free(device);
 	}
-
+	if (iter->gds_io) {
+		free(iter->gds_io->descr);
+		free(iter->gds_io->handle);
+		free(iter->gds_io->expected);
+		free(iter->gds_io->actual);
+		for (uint32_t i = 0; i < iter->opts->batch_size; i++) {
+			cudaStreamDestroy(iter->gds_io->streams[i]);
+		}
+		free(iter->gds_io->streams);
+	}
 	if (iter->gpu_io) {
 		xnvme_gpu_io_free(iter->gpu_io);
 	}
@@ -483,6 +545,16 @@ sil_init(struct sil_iter **iter, char **dev_uris, uint32_t n_devs, struct sil_op
 	if (opts->batch_size % n_devs != 0) {
 		fprintf(stderr, "Batch size (%u) not divisible by number of devices (%u)\n",
 			opts->batch_size, n_devs);
+	}
+
+	if (opts->buffered && strcmp(opts->backend, "posix") != 0) {
+		fprintf(stderr, "opts->buffered == true is only compatible with POSIX backend");
+		return EINVAL;
+	}
+
+	if (opts->async && strcmp(opts->backend, "gds") != 0) {
+		fprintf(stderr, "opts->async == true is only compatible with GDS backend");
+		return EINVAL;
 	}
 
 	_iter = malloc(sizeof(struct sil_iter));
@@ -563,7 +635,11 @@ sil_init(struct sil_iter **iter, char **dev_uris, uint32_t n_devs, struct sil_op
 			_iter->io_fn = sil_cpu_submit;
 			break;
 		case SIL_FILE:
-			_iter->io_fn = sil_file_submit;
+			if (_iter->opts->async) {
+				_iter->io_fn = sil_gds_async_submit;
+			} else {
+				_iter->io_fn = sil_file_submit;
+			}
 			_find_prefix(_iter);
 			break;
 		}
@@ -644,7 +720,8 @@ sil_opts_default()
 				.queue_depth = 1024,
 				.batch_size = 1,
 				.random = false,
-				.buffered = false};
+				.buffered = false,
+				.async = false};
 
 	return opts;
 }
