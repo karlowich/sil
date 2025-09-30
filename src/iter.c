@@ -8,6 +8,7 @@
 #include <sil_util.h>
 
 #include <cuda_runtime.h>
+#include <cufile.h>
 #include <libxal.h>
 #include <libxnvme.h>
 
@@ -32,6 +33,7 @@ _xnvme_setup(struct sil_iter *iter, struct sil_dev *device, const char *uri)
 	struct xnvme_opts opts = xnvme_opts_default();
 	struct xnvme_dev *dev;
 	int err;
+	CUfileError_t status;
 
 	if (strcmp(backend, "io_uring") == 0) {
 		opts.be = "linux";
@@ -58,6 +60,11 @@ _xnvme_setup(struct sil_iter *iter, struct sil_dev *device, const char *uri)
 	} else if (strcmp(backend, "gds") == 0) {
 		opts.be = "linux";
 		iter->type = SIL_FILE;
+		status = cuFileDriverOpen();
+		if (status.err != CU_FILE_SUCCESS) {
+			fprintf(stderr, "Could not open cuFile driver: %d\n", status.err);
+			return status.err;
+		}
 	} else {
 		fprintf(stderr, "Invalid backend: %s\n", backend);
 		return EINVAL;
@@ -309,6 +316,11 @@ _alloc(struct sil_iter *iter, uint32_t n_buffers)
 				break;
 			case SIL_FILE:
 				err = cudaMalloc(&device->buffers[j], iter->buffer_size);
+				if (err) {
+					fprintf(stderr, "Could not allocate buffers[%d]: %d\n", i,
+						err);
+					return err;
+				}
 				break;
 			}
 			if (!device->buffers[j]) {
@@ -415,6 +427,7 @@ sil_term(struct sil_iter *iter)
 		}
 		xal_close(device->xal);
 		xnvme_dev_close(device->dev);
+		cuFileDriverClose();
 		if (device->cpu_io) {
 			free(device->cpu_io->slbas);
 			free(device->cpu_io->elbas);
