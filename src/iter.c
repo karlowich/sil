@@ -51,7 +51,7 @@ _xnvme_setup(struct sil_iter *iter, struct sil_dev *device, const char *uri)
 	} else if (strcmp(backend, "libnvm-cpu") == 0) {
 		opts.be = "bam";
 		iter->type = SIL_CPU;
-	} else if (strcmp(backend, "libnvm-gpu") == 0) {
+	} else if (strcmp(backend, "libnvm-gpu") == 0 || strcmp(backend, "aisio") == 0) {
 		opts.be = "bam";
 		iter->type = SIL_GPU;
 	} else if (strcmp(backend, "posix") == 0) {
@@ -712,7 +712,7 @@ sil_opts_default()
 {
 	struct sil_opts opts = {.data_dir = "",
 				.mnt = "/mnt",
-				.backend = "libnvm-gpu",
+				.backend = "aisio",
 				.nlb = 7,
 				.nbytes = 4096,
 				.gpu_nqueues = 128,

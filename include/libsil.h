@@ -72,7 +72,7 @@ struct sil_output {
  *
  * data_dir = NULL
  * mnt = "/mnt"
- * backend = "libnvm-gpu"
+ * backend = "aisio"
  * nlb = 7
  * nbytes = 4096
  * gpu_nqueues = 128
