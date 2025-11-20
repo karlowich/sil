@@ -163,9 +163,14 @@ static int
 _xal_setup(struct sil_iter *iter, struct sil_dev *device)
 {
 	struct xal *xal;
+	struct xal_opts xal_opts = {0};
+	struct xal_inode *root;
+	uint32_t xal_blksize;
 	int err;
 
-	err = xal_open(device->dev, &xal);
+	xal_opts.be = XAL_BACKEND_XFS;
+
+	err = xal_open(device->dev, &xal, &xal_opts);
 	if (err) {
 		fprintf(stderr, "xal_open(): %d\n", err);
 		return err;
@@ -187,7 +192,8 @@ _xal_setup(struct sil_iter *iter, struct sil_dev *device)
 
 	device->data_dir = iter->opts->data_dir;
 
-	err = xal_walk(xal, xal->root, find_data_dir, device);
+	root = xal_get_root(xal);
+	err = xal_walk(xal, root, find_data_dir, device);
 	switch (err) {
 	case DATA_DIR_FOUND:
 		break;
@@ -210,10 +216,12 @@ _xal_setup(struct sil_iter *iter, struct sil_dev *device)
 			return err;
 		}
 
+		xal_blksize = xal_get_sb_blocksize(xal);
+
 		iter->stats->avg_file_size = iter->stats->avg_file_size / iter->stats->n_files;
 		// Align to page size
-		iter->buffer_size = (1 + ((iter->stats->max_file_size - 1) / xal->sb.blocksize)) *
-				    (xal->sb.blocksize);
+		iter->buffer_size = (1 + ((iter->stats->max_file_size - 1) / xal_blksize)) *
+				    (xal_blksize);
 	}
 
 	// Sort the directories so we can derive labels

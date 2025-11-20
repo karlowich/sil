@@ -30,6 +30,7 @@ sil_cpu_submit(struct sil_iter *iter)
 	struct xal_inode file;
 	struct xal_extent extent, next_extent;
 	uint64_t nblocks, nbytes, blocksize, next_slba;
+	uint32_t xal_blksize;
 	struct timespec start, end;
 	int err;
 
@@ -37,6 +38,7 @@ sil_cpu_submit(struct sil_iter *iter)
 		clock_gettime(CLOCK_MONOTONIC_RAW, &start);
 		struct sil_dev *device = iter->devs[i];
 		blocksize = xnvme_dev_get_geo(device->dev)->lba_nbytes;
+		xal_blksize = xal_get_sb_blocksize(device->xal);
 
 		for (uint32_t j = 0; j < device->n_buffers; j++) {
 			entry = iter->data->entries[iter->data->index++ % iter->data->n_entries];
@@ -47,7 +49,7 @@ sil_cpu_submit(struct sil_iter *iter)
 			device->cpu_io->slbas[j] =
 			    xal_fsbno_offset(device->xal, extent.start_block) / blocksize;
 
-			nbytes = extent.nblocks * device->xal->sb.blocksize;
+			nbytes = extent.nblocks * xal_blksize;
 			nblocks = nbytes / blocksize;
 			iter->output->buf_len[j + i * device->n_buffers] = file.size;
 			iter->output->labels[j + i * device->n_buffers] = entry.dir;
@@ -67,7 +69,7 @@ sil_cpu_submit(struct sil_iter *iter)
 						next_slba);
 					return ENOTSUP;
 				}
-				nbytes += next_extent.nblocks * device->xal->sb.blocksize;
+				nbytes += next_extent.nblocks * xal_blksize;
 				nblocks = nbytes / blocksize;
 			}
 			device->cpu_io->elbas[j] = device->cpu_io->slbas[j] + nblocks - 1;
@@ -145,7 +147,7 @@ sil_gpu_submit(struct sil_iter *iter)
 	struct xal_inode file;
 	struct xal_extent extent;
 	uint64_t nblocks, nbytes, blocksize, slba, offset, n_io = 0;
-	uint32_t dev_id, buf_id;
+	uint32_t dev_id, buf_id, xal_blksize;
 	void *buffer;
 	struct timespec start, end;
 	int err;
@@ -157,6 +159,7 @@ sil_gpu_submit(struct sil_iter *iter)
 		buf_id = device->buf++ % device->n_buffers;
 		buffer = device->buffers[buf_id];
 		blocksize = xnvme_dev_get_geo(device->dev)->lba_nbytes;
+		xal_blksize = xal_get_sb_blocksize(device->xal);
 		offset = 0;
 
 		entry = iter->data->entries[iter->data->index++ % iter->data->n_entries];
@@ -168,7 +171,7 @@ sil_gpu_submit(struct sil_iter *iter)
 		for (uint32_t j = 0; j < file.content.extents.count; j++) {
 			extent = file.content.extents.extent[j];
 			slba = xal_fsbno_offset(device->xal, extent.start_block) / blocksize;
-			nbytes = extent.nblocks * device->xal->sb.blocksize;
+			nbytes = extent.nblocks * xal_blksize;
 			nblocks = nbytes / blocksize;
 			for (uint64_t k = 0; k < nblocks / (iter->opts->nlb + 1); k++) {
 				iter->gpu_io->offsets[n_io] = offset * (iter->opts->nlb + 1);
@@ -268,7 +271,7 @@ sil_file_submit(struct sil_iter *iter)
 	CUfileError_t status;
 	CUfileDescr_t descr;
 	CUfileHandle_t fh;
-	uint32_t buf_id, dev_id;
+	uint32_t buf_id, dev_id, xal_blksize;
 	uint64_t nbytes;
 	void *buffer, *bounce;
 	char *prefix, *path;
@@ -285,6 +288,7 @@ sil_file_submit(struct sil_iter *iter)
 		prefix = device->file_io->prefix;
 		path = device->file_io->path;
 		bounce = device->file_io->buffer;
+		xal_blksize = xal_get_sb_blocksize(device->xal);
 
 		entry = iter->data->entries[iter->data->index++ % iter->data->n_entries];
 		dir = device->root_inode->content.dentries.inodes[entry.dir];
@@ -309,8 +313,7 @@ sil_file_submit(struct sil_iter *iter)
 		} else {
 			if (!is_gds && !iter->opts->buffered) {
 				// POSIX O_DIRECT requires aligned nbytes
-				nbytes = (1 + ((file.size - 1) / device->xal->sb.blocksize)) *
-					 (device->xal->sb.blocksize);
+				nbytes = (1 + ((file.size - 1) / xal_blksize)) * xal_blksize;
 			}
 			flags = O_RDONLY | O_DIRECT;
 		}
