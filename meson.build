@@ -1,5 +1,5 @@
 project('sil', 'c',
-  version: '0.1.0',
+  version: '0.1.1',
   meson_version: '>=0.55.0',
   default_options: [
     'c_std=gnu11',
