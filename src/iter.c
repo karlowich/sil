@@ -426,6 +426,15 @@ _alloc(struct fil_iter *iter, uint32_t n_buffers)
 			fprintf(stderr, "Could not allocate array of buffers: %d\n", err);
 			return err;
 		}
+		if (iter->type == FIL_CPU && iter->opts->copy_to_gpu) {
+			device->gpu_buffers = malloc(sizeof(void *) * device->n_buffers);
+			if (!device->gpu_buffers) {
+				err = errno;
+				fprintf(stderr, "Could not allocate array of GPU buffers: %d\n",
+					err);
+				return err;
+			}
+		}
 		for (uint32_t j = 0; j < device->n_buffers; j++) {
 			switch (iter->type) {
 			case FIL_GPU:
@@ -436,6 +445,16 @@ _alloc(struct fil_iter *iter, uint32_t n_buffers)
 			case FIL_CPU:
 				device->buffers[j] =
 					xnvme_buf_alloc(device->dev, iter->buffer_size);
+				if (device->buffers[j] && iter->opts->copy_to_gpu) {
+					err = cudaMalloc(&device->gpu_buffers[j],
+							 iter->buffer_size);
+					if (err) {
+						fprintf(stderr,
+							"Could not allocate gpu_buffers[%d]: %d\n",
+							i, err);
+						return err;
+					}
+				}
 				break;
 			case FIL_FILE:
 				err = cudaMalloc(&device->buffers[j], iter->buffer_size);
@@ -462,7 +481,13 @@ _alloc(struct fil_iter *iter, uint32_t n_buffers)
 				fprintf(stderr, "Could not allocate buffers[%d]: %d\n", i, err);
 				return err;
 			}
-			iter->output->buffers[j + i * device->n_buffers] = device->buffers[j];
+			if (iter->type == FIL_CPU && iter->opts->copy_to_gpu) {
+				iter->output->buffers[j + i * device->n_buffers] =
+					device->gpu_buffers[j];
+			} else {
+				iter->output->buffers[j + i * device->n_buffers] =
+					device->buffers[j];
+			}
 		}
 
 		if (iter->type == FIL_FILE) {
@@ -636,7 +661,11 @@ fil_term(struct fil_iter *iter)
 		case FIL_CPU:
 			for (uint32_t j = 0; j < device->n_buffers; j++) {
 				xnvme_buf_free(device->dev, device->buffers[j]);
+				if (device->gpu_buffers) {
+					cudaFree(device->gpu_buffers[j]);
+				}
 			}
+			free(device->gpu_buffers);
 			xnvme_queue_term(device->queue);
 			break;
 		case FIL_FILE:
@@ -724,6 +753,14 @@ fil_init(struct fil_iter **iter, char **dev_uris, uint32_t n_devs, struct fil_op
 	if (opts->register_bufs && strcmp(opts->backend, "cufile") != 0) {
 		fprintf(stderr,
 			"opts->register_bufs == true is only compatible with cuFile backend");
+		return EINVAL;
+	}
+
+	if (opts->copy_to_gpu && strcmp(opts->backend, "aisio-cpu") != 0 &&
+	    strcmp(opts->backend, "posix") != 0) {
+		fprintf(stderr, "opts->copy_to_gpu == true is only compatible with the aisio-cpu "
+				"and posix "
+				"backends\n");
 		return EINVAL;
 	}
 
@@ -881,7 +918,8 @@ fil_opts_default()
 				.batch_size = 1,
 				.buffered = false,
 				.async = false,
-				.register_bufs = false};
+				.register_bufs = false,
+				.copy_to_gpu = false};
 
 	return opts;
 }

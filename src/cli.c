@@ -46,6 +46,8 @@ print_help(const char *name)
 	fprintf(stderr, "\t --async \t | \t Use the async API when using cuFile\n");
 	fprintf(stderr, "\t --register_bufs | \t Register device buffers with cuFileBufRegister "
 			"(cuFile backend)\n");
+	fprintf(stderr, "\t --copy-to-gpu \t | \t Copy each file from host to device memory after "
+			"reading. Only relevant for backends: 'aisio-cpu' and 'posix'\n");
 	fprintf(stderr, "\t --summary \t | \t Print IO and dataset stats\n");
 	fprintf(stderr, "\t --help \t | \t Print this message\n");
 }
@@ -114,6 +116,8 @@ parse_args(int argc, char *argv[], struct fil_cli_args *args, struct fil_opts *o
 			opts->async = true;
 		} else if (strcmp(argv[i], "--register_bufs") == 0) {
 			opts->register_bufs = true;
+		} else if (strcmp(argv[i], "--copy-to-gpu") == 0) {
+			opts->copy_to_gpu = true;
 		} else if (strcmp(argv[i], "--summary") == 0) {
 			args->summary = true;
 		} else if (strcmp(argv[i], "--help") == 0) {

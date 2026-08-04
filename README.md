@@ -59,6 +59,7 @@ filperf <device-uri>[,<device-uri>,...] [options]
 | `--max-file-size <n>` | _(required)_ | Max file size in bytes; required for the `aisio-cpu`/`aisio-gpu`/`aisio-p2p` backends to size the upcie heap |
 | `--warmup <n>` | `0` | Un-timed batches to run before starting the measurement window |
 | `--buffered` | off | Disable `O_DIRECT` when using `posix` backend |
+| `--copy-to-gpu` | off | Copy each file from host to device memory after reading (`aisio-cpu` and `posix` only) |
 | `--async` | off | Use async API when using `cufile` backend |
 | `--summary` | off | Print I/O and dataset statistics after completion |
 | `--help` | | Print usage |
