@@ -17,6 +17,7 @@ init(PyObject *self, PyObject *args, PyObject *keywds)
 	struct fil_stats *stats;
 	struct fil_iter *iter;
 	char *dev_uri;
+	int buffered = 0, use_async = 0, register_bufs = 0, copy_to_gpu = 0;
 	int err;
 
 	if (FilIter) {
@@ -24,16 +25,24 @@ init(PyObject *self, PyObject *args, PyObject *keywds)
 		return NULL;
 	}
 
-	static char *kwlist[] = {"dev_uri",    "data_dir",    "mnt",           "backend",
-				 "iosize",     "gpu_nqueues", "max_file_size", "queue_depth",
-				 "batch_size", NULL};
+	// 'async' is a reserved word in Python, so it is exposed under the keyword 'async_'.
+	static char *kwlist[] = {"dev_uri",     "data_dir",    "mnt",           "backend",
+				 "iosize",      "gpu_nqueues", "max_file_size", "queue_depth",
+				 "batch_size",  "buffered",    "async_",        "register_bufs",
+				 "copy_to_gpu", NULL};
 
-	if (!PyArg_ParseTupleAndKeywords(args, keywds, "s|$sssiikii", kwlist, &dev_uri,
+	// Bools are parsed via 'p' into ints, then folded back into opts.
+	if (!PyArg_ParseTupleAndKeywords(args, keywds, "s|$sssiikiipppp", kwlist, &dev_uri,
 					 &opts.data_dir, &opts.mnt, &opts.backend, &opts.iosize,
 					 &opts.gpu_nqueues, &opts.max_file_size, &opts.queue_depth,
-					 &opts.batch_size)) {
+					 &opts.batch_size, &buffered, &use_async, &register_bufs,
+					 &copy_to_gpu)) {
 		return NULL;
 	}
+	opts.buffered = buffered;
+	opts.async = use_async;
+	opts.register_bufs = register_bufs;
+	opts.copy_to_gpu = copy_to_gpu;
 
 	err = fil_init(&iter, &dev_uri, 1, &opts);
 	if (err) {
