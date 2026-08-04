@@ -43,6 +43,7 @@ struct fil_opts {
 	bool buffered;       ///< Whether to use O_DIRECT with POSIX
 	bool async;          ///< Whether to use async API with cuFile
 	bool register_bufs;  ///< Register cuFile device buffers with cuFileBufRegister
+	bool copy_to_gpu;    ///< aisio-cpu/posix: copy files host->device after read
 };
 
 /**

@@ -198,6 +198,24 @@ drain:
 	return err;
 }
 
+static int
+_copy_buffers_to_gpu(struct fil_iter *iter, struct fil_dev *device, uint32_t dev_id)
+{
+	uint32_t slot;
+	int err;
+
+	for (uint32_t i = 0; i < device->n_buffers; i++) {
+		slot = i + dev_id * device->n_buffers;
+		err = cudaMemcpy(device->gpu_buffers[i], device->buffers[i],
+				 iter->output->buf_len[slot], cudaMemcpyHostToDevice);
+		if (err) {
+			fprintf(stderr, "Could not copy data to GPU memory, err: %d\n", err);
+			return err;
+		}
+	}
+	return 0;
+}
+
 int
 fil_cpu_submit(struct fil_iter *iter)
 {
@@ -211,6 +229,9 @@ fil_cpu_submit(struct fil_iter *iter)
 		clock_gettime(CLOCK_MONOTONIC_RAW, &start);
 
 		err = _submit_device(iter, device, i);
+		if (!err && iter->opts->copy_to_gpu) {
+			err = _copy_buffers_to_gpu(iter, device, i);
+		}
 
 		clock_gettime(CLOCK_MONOTONIC_RAW, &end);
 		iter->stats->io_time += ELAPSED(start, end);
@@ -446,11 +467,15 @@ fil_file_submit(struct fil_iter *iter)
 				bytes_read += err;
 			} while ((uint64_t)bytes_read != file->size);
 
-			err = cudaMemcpy(buffer, bounce, file->size, cudaMemcpyHostToDevice);
-			if (err) {
-				fprintf(stderr, "Could not copy data to GPU memory, err: %ld\n",
-					err);
-				return err;
+			if (iter->opts->copy_to_gpu) {
+				err = cudaMemcpy(buffer, bounce, file->size,
+						 cudaMemcpyHostToDevice);
+				if (err) {
+					fprintf(stderr,
+						"Could not copy data to GPU memory, err: %ld\n",
+						err);
+					return err;
+				}
 			}
 		}
 		clock_gettime(CLOCK_MONOTONIC_RAW, &end);
